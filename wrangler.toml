@@ -1,0 +1,4 @@
+name = "zyj"
+main = "worker.js"
+compatibility_date = "2026-02-04"
+keep_vars = true
